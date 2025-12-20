@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Cognitive Loom",
+  "version": "0.1.0",
+  "description": "Personal Knowledge Architecture for Contextual Problem-Solving",
+  "permissions": [
+    "sidePanel",
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open Cognitive Loom"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}

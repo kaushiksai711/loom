@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Cognitive Loom</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background-color: #f9f9f9;
+      color: #333;
+    }
+    h1 { font-size: 18px; margin-bottom: 12px; }
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 12px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+      margin-bottom: 12px;
+    }
+    .btn {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      width: 100%;
+    }
+    .btn:hover { background: #0056b3; }
+    #status { font-size: 12px; color: #666; margin-top: 8px; }
+    #seed-list { list-style: none; padding: 0; }
+    #seed-list li {
+      padding: 8px;
+      border-bottom: 1px solid #eee;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Cognitive Loom</h1>
+  
+  <div class="card">
+    <h3>Active Session</h3>
+    <div id="session-info">No active session</div>
+    <button id="create-session-btn" class="btn">New Session</button>
+  </div>
+
+  <div class="card">
+    <h3>Harvested Seeds</h3>
+    <ul id="seed-list"></ul>
+  </div>
+
+  <div id="status"></div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
