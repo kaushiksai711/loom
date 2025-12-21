@@ -21,3 +21,10 @@ class Session(SessionBase):
 
     class Config:
         populate_by_name = True
+
+class HarvestRequest(BaseModel):
+    highlight: str
+    context: str = "Context placeholder"
+    source_url: str
+    session_id: str
+
