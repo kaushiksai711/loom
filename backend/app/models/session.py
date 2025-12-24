@@ -15,8 +15,10 @@ class Session(SessionBase):
     key: str = Field(alias="_key")
     id: str = Field(alias="_id")
     created_at: datetime
+    expires_at: Optional[datetime] = None # TTL Support
     finalized_at: Optional[datetime] = None
     harvested_nodes: List[str] = []
+    attachments: List[str] = [] # Evidence Log
     metrics: Dict[str, Any] = {}
 
     class Config:

@@ -13,7 +13,7 @@ async def initiate_harvest(harvest_in: HarvestRequest):
     """
     try:
         # 1. Ingest Raw Seed (Vector Store)
-        rag_service.ingest_document(
+        await rag_service.ingest_document(
             content=harvest_in.highlight, 
             metadata={
                 "source_url": harvest_in.source_url,

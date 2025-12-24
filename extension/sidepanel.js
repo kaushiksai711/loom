@@ -9,6 +9,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const createBtn = document.getElementById('create-session-btn');
     const statusDiv = document.getElementById('status');
     const seedList = document.getElementById('seed-list');
+    const sessionInput = document.getElementById('session-input');
+    const joinBtn = document.getElementById('join-btn');
 
     // Tabs
     const tabs = document.querySelectorAll('.tab-btn');
@@ -72,28 +74,39 @@ document.addEventListener('DOMContentLoaded', () => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    title: "New Session " + new Date().toLocaleTimeString(),
-                    goal: "Learning"
+                    title: "Extension Session " + new Date().toLocaleTimeString(),
+                    goal: "Quick Capture"
                 })
             });
 
             if (!res.ok) {
                 const text = await res.text();
-                console.error("FULL API ERROR:", text);
-                throw new Error("API Error: " + res.status + " | " + text.substring(0, 200));
+                throw new Error("API Error: " + res.status);
             }
 
             const data = await res.json();
-            currentSessionId = data._key;
-            document.getElementById('session-info').textContent = data.title;
+            // Backend now returns { session_id, status }
+            currentSessionId = data.session_id;
+
+            document.getElementById('session-info').textContent = currentSessionId;
+            sessionInput.value = currentSessionId; // Auto-fill
             statusDiv.textContent = "Session created!";
 
             chrome.storage.local.set({ currentSessionId });
 
         } catch (e) {
             statusDiv.textContent = "Error: " + e.message;
-            console.error(e);
         }
+    });
+
+    joinBtn.addEventListener('click', () => {
+        const val = sessionInput.value.trim();
+        if (!val) return;
+
+        currentSessionId = val;
+        document.getElementById('session-info').textContent = "Synced: " + val.substring(0, 8) + "...";
+        chrome.storage.local.set({ currentSessionId: val });
+        statusDiv.textContent = "Session Synced manually.";
     });
 
     async function handleHarvest(payload) {

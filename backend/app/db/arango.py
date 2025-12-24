@@ -16,7 +16,7 @@ class ArangoDB:
             self.db = self.client.db(settings.ARANGO_DB_NAME, username=settings.ARANGO_USERNAME, password=settings.ARANGO_PASSWORD)
             
             # Initialize Document Collections
-            doc_collections = ["Concepts", "Sessions", "Seeds"]
+            doc_collections = ["Concepts", "Sessions", "Seeds", "UserSeeds"]
             for col in doc_collections:
                 if not self.db.has_collection(col):
                     self.db.create_collection(col)
