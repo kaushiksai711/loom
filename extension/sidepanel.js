@@ -133,7 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     highlight: payload.highlight,
-                    context: "Context placeholder",
+                    context: payload.context || "Context placeholder", // Use captured context
                     source_url: payload.source_url,
                     session_id: currentSessionId
                 })

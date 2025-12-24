@@ -39,7 +39,9 @@ async def chat_session(request: ChatRequest):
         
         # Format context (Stringify the list of documents)
         context_text = "\n".join([
-            f"Result (Score: {item['score']}): {item['doc'].get('highlight', item['doc'].get('label', 'Unknown'))}" 
+            f"Result (Score: {item['score']:.2f}):\n"
+            f"  Highlight: {item['doc'].get('highlight', item['doc'].get('label', 'Unknown'))}\n"
+            f"  Context: {item['doc'].get('context', 'No surrounding context available.')}\n"
             for item in context_result if 'doc' in item
         ])
         
