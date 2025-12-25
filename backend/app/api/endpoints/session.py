@@ -42,3 +42,30 @@ async def end_session(request: EndSessionRequest, background_tasks: BackgroundTa
         return {"status": "consolidation_started", "message": "Brain structure updating in background."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+class UpdateContentRequest(BaseModel):
+    item_id: str
+    content: str
+
+@router.get("/{session_id}/summary")
+async def get_session_summary_endpoint(session_id: str):
+    """
+    Returns the full session report including temporal log.
+    """
+    summary = await rag_service.get_session_summary(session_id)
+    if not summary:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return summary
+
+@router.patch("/{session_id}/content")
+async def update_session_content_endpoint(session_id: str, request: UpdateContentRequest):
+    """
+    Updates the content of a specific item (Seed/UserSeed) in the session.
+    """
+    try:
+        updated = await rag_service.update_session_content(session_id, request.item_id, request.content)
+        return {"status": "success", "updated": updated}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -21,7 +21,7 @@ interface GraphProps {
 }
 
 const GraphVisualization: React.FC<GraphProps> = ({ data, isCrystallized, onNodeClick }) => {
-    const fgRef = useRef<ForceGraphMethods>();
+    const fgRef = useRef<ForceGraphMethods | undefined>(undefined);
     const [width, height] = useWindowSize(); // Or just use hardcoded/parent dims
 
     // 1. PHYSICS ENGINE CONTROLLER
@@ -126,7 +126,6 @@ const GraphVisualization: React.FC<GraphProps> = ({ data, isCrystallized, onNode
 
                 // --- Appearance ---
                 backgroundColor="#00000000" // Transparent (let parent bg shine through)
-                showNavInfo={false}
 
                 // --- Node Rendering Switch ---
                 nodeCanvasObject={(node, ctx, scale) => {

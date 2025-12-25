@@ -5,6 +5,7 @@
 // Actually, react-force-graph-2d often fails SSR, so let's keep dynamic import but handle it properly.
 import dynamic from 'next/dynamic';
 import React, { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import ChatInterface, { ChatIntent } from "@/components/ChatInterface";
 
@@ -15,6 +16,7 @@ const GraphVisualization = dynamic(() => import("@/components/GraphVisualization
 });
 
 export default function Home() {
+  const router = useRouter();
   const [sessionID, setSessionID] = useState("session_alpha_1"); // Hardcoded for MVP
   const [isCrystallized, setIsCrystallized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -110,6 +112,7 @@ export default function Home() {
 
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("session_id", sessionID);
 
     try {
       // Re-using existing ingestion API
@@ -421,8 +424,11 @@ export default function Home() {
                 </div>
 
                 <div className="flex gap-4 justify-center">
-                  <button className="px-6 py-2 rounded-lg bg-teal-500 hover:bg-teal-400 text-black font-bold transition-colors">
-                    Export Mindmap
+                  <button
+                    onClick={() => router.push(`/session/${sessionID}/report`)}
+                    className="px-6 py-2 rounded-lg bg-teal-500 hover:bg-teal-400 text-black font-bold transition-colors"
+                  >
+                    View Final Report
                   </button>
                   <button
                     onClick={() => setIsCrystallized(false)}

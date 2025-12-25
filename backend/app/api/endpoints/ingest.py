@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from backend.app.services.ingestion import IngestionService
 import shutil
 import os
@@ -10,9 +10,10 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), session_id: str = Form(None)):
     """
     Uploads a file, ingests it, and prepares it for the graph.
+    If session_id is provided, links evidence to that session.
     """
     try:
         # Save temp file
@@ -38,7 +39,8 @@ async def upload_file(file: UploadFile = File(...)):
                     "source": file.filename,
                     "file_type": ext,
                     "chunk_id": doc.metadata.get("start_index", 0),
-                    "type": "document_chunk"
+                    "type": "document_chunk",
+                    "session_id": session_id 
                 }
             )
             ingested_count += 1

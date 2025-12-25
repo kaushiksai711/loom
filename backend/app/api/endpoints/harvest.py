@@ -17,7 +17,7 @@ async def initiate_harvest(harvest_in: HarvestRequest):
         await rag_service.ingest_document(
             content=harvest_in.highlight, 
             metadata={
-                "source_url": harvest_in.source_url,
+                "source": harvest_in.source_url,
                 "session_id": harvest_in.session_id,
                 "context": harvest_in.context,
                 "type": "highlight"
