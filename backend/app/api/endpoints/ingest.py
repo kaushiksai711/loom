@@ -36,6 +36,7 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form(None)
             await rag_service.ingest_document(
                 content=doc.page_content,
                 metadata={
+                    **doc.metadata, # Preserve original metadata (e.g. page, source)
                     "source": file.filename,
                     "file_type": ext,
                     "chunk_id": doc.metadata.get("start_index", 0),

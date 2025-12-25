@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, use } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Calendar, Clock, Edit2, Check, X, FileText, Brain, Share2, Layers } from "lucide-react";
 import ThreeDMindmap from "@/components/ThreeDMindmap";
@@ -50,6 +50,7 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
     // Using `use` hook for params if it's a promise (latest Next.js) or just hook.
     // Let's stick to standard `useParams` for client components to be safe.
     const { id } = useParams();
+    const router = useRouter();
 
     const [summary, setSummary] = useState<SessionSummary | null>(null);
     const [loading, setLoading] = useState(true);
@@ -255,7 +256,10 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
                     >
                         <CrystallizationWizard
                             sessionId={id as string}
-                            onComplete={() => alert("Session Crystallized! (Redirecting to Dashboard...)")}
+                            onComplete={() => {
+                                alert("Session Crystalized and Archived. Redirecting to Brain...");
+                                router.push('/');
+                            }}
                         />
                     </motion.div>
                 )}

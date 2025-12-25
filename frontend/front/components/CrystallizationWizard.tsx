@@ -198,6 +198,39 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
                 )}
             </div>
 
+            {/* New Concepts List (Review Section) */}
+            {proposal.new_nodes.length > 0 && (
+                <div>
+                    <h3 className="flex items-center gap-2 text-lg font-semibold text-slate-200 mb-4">
+                        <Save className="w-5 h-5 text-blue-400" />
+                        New Knowledge to Crystalize
+                    </h3>
+                    <div className="bg-black/30 border border-white/10 rounded-xl p-4">
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-60 overflow-y-auto custom-scrollbar">
+                            {proposal.new_nodes.map((node: any, i) => {
+                                const rawText = node.text || node.label || node.highlight || "Untitled Node";
+                                const parts = rawText.includes(':') ? rawText.split(':') : [rawText, ''];
+                                const title = parts[0].trim();
+                                const desc = parts[1].trim() || parts[0].trim();
+
+                                return (
+                                    <div key={i} className="flex items-start gap-2 p-2 rounded hover:bg-white/5 transition-colors">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-2 shrink-0" />
+                                        <div>
+                                            <div className="text-sm text-slate-200 font-medium">{title}</div>
+                                            <div className="text-xs text-slate-500 line-clamp-1">{desc}</div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div className="mt-2 text-xs text-center text-slate-600 border-t border-white/5 pt-2">
+                            These {proposal.new_nodes.length} concepts will be permanently added to your Cognitive Graph.
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Action Bar */}
             <div className="flex items-center justify-end gap-4 pt-4 border-t border-white/10">
                 <div className="text-right">
@@ -211,7 +244,7 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
                 <button
                     onClick={handleCommit}
                     disabled={committing}
-                    className="flex items-center gap-2 px-6 py-3 bg-active text-black font-bold rounded-xl hover:bg-active/90 shadow-glow disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-500 border border-blue-400 shadow-lg shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                 >
                     {committing ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     {committing ? "Crystallizing..." : "Commit Reasoning"}

@@ -564,12 +564,34 @@ class GraphRAGService:
         
         # Evidence Nodes (Orange)
         for s in seeds:
-            graph_nodes.append({"id": s["_id"], "label": "Evidence", "group": "evidence", "color": "orange", "val": 3, "title": s.get("source", "Evidence")})
+            # Try to find page info in various common keys
+            page = s.get("page") or s.get("page_label") or s.get("page_number")
+            source_label = s.get("source", "Evidence")
+            if page:
+                source_label = f"{source_label} (Page {page})"
+                
+            graph_nodes.append({
+                "id": s["_id"], 
+                "label": "Evidence", 
+                "group": "evidence", 
+                "color": "orange", 
+                "val": 3, 
+                "title": source_label,
+                "content": s.get("highlight", "") # Pass actual text!
+            })
             
         # Thought Nodes (Purple)
         for u in user_seeds:
             if u.get('type') not in ['extracted_concept', 'extracted_relation']:
-                graph_nodes.append({"id": u["_id"], "label": "Thought", "group": "thought", "color": "purple", "val": 5, "title": u.get("text", "")})
+                graph_nodes.append({
+                    "id": u["_id"], 
+                    "label": "Thought", 
+                    "group": "thought", 
+                    "color": "purple", 
+                    "val": 5, 
+                    "title": u.get("label", "Thought"),
+                    "content": u.get("text", "") 
+                })
         
         # Extracted Concept Nodes (Blue)
         for c in extracted_concepts:
@@ -579,7 +601,8 @@ class GraphRAGService:
                 "group": "concept", 
                 "color": "#3b82f6", 
                 "val": 8,
-                "title": c.get("definition", "")
+                "title": c.get("definition", ""),
+                "content": c.get("definition", "")
             })
             
         # Edges
@@ -687,6 +710,20 @@ class GraphRAGService:
         except Exception as e:
             print(f"LLM Extraction Failed: {e}")
             return {"concepts": [], "relationships": []}
+
+    async def update_session_content(self, session_id: str, item_id: str, new_content: str):
+        """
+        Updates the content of a Seed or UserSeed.
+        Block updates if session is crystallised.
+        """
+        # 1. Check Session Status
+        aql_status = "RETURN DOCUMENT(CONCAT('Sessions/', @session_id)).status"
+        cursor = self.db.aql.execute(aql_status, bind_vars={"session_id": session_id})
+        status = cursor.next() if cursor.batch() else None
+        
+        if status == 'crystallized':
+            raise ValueError("Session is Crystallized and cannot be edited.")
+
         # Determine collection based on ID prefix
         # ID format: Collection/Key
         
@@ -754,21 +791,30 @@ class GraphRAGService:
         merges = []
         new_nodes = []
         conflicts = []
+        seen_labels = set()
         
         for seed in candidates_to_process:
-            embedding = seed.get('embedding')
-            # If extracted concept lacks embedding, generate it on fly
-            if not embedding and seed.get('text'):
-                 seed['embedding'] = self.embed_query(seed['text']).tolist()
-                 embedding = seed['embedding']
-                 
-            if not embedding: 
-                new_nodes.append(seed)
+            # Determine effective text label
+            seed_text = seed.get('label') if seed.get('type') == 'extracted_concept' else seed.get('text')
+            if not seed_text or len(seed_text.strip()) < 3: 
                 continue
                 
-            # Use 'label' if available (for extracted concepts), else 'text'
-            seed_text = seed.get('label') if seed.get('type') == 'extracted_concept' else seed.get('text')
+            # Dedup within this session's proposal
+            normalized_label = seed_text.lower().strip()
+            if normalized_label in seen_labels:
+                continue
+            seen_labels.add(normalized_label)
             
+            # Ensure the node has 'text' for the frontend
+            if not seed.get('text'):
+                seed['text'] = seed_text
+
+            embedding = seed.get('embedding')
+            # If extracted concept lacks embedding, generate it on fly
+            if not embedding:
+                 seed['embedding'] = self.embed_query(seed_text).tolist()
+                 embedding = seed['embedding']
+                 
             # Find Global Candidates (>0.85 similarity)
             # Exclude current session's seeds to avoid self-match
             print(f"DEBUG: Searching candidates for seed '{seed_text[:30]}...'")
@@ -876,7 +922,7 @@ class GraphRAGService:
             created_concepts.append(meta)
             
             # LINK: Seed -> Crystallized As -> Concept
-            self.db.collection("Edges").insert({
+            self.db.collection("Relationships").insert({
                 "_from": node['_id'],
                 "_to": meta['_id'],
                 "type": "CRYSTALLIZED_AS",
