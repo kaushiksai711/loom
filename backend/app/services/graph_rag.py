@@ -602,7 +602,8 @@ class GraphRAGService:
                 "color": "#3b82f6", 
                 "val": 8,
                 "title": c.get("definition", ""),
-                "content": c.get("definition", "")
+                "content": c.get("definition", ""),
+                "category": c.get("type", "Concept") # Pass category for coloring
             })
             
         # Edges
@@ -674,12 +675,13 @@ class GraphRAGService:
         
         1. Identify the Top 5-10 Core Concepts (Entities, Topics).
         2. Identify logical Relationships between them (e.g., "enables", "is_part_of", "contradicts").
+        3. Assign a general Category to each concept (e.g., "Organization", "Person", "Event", "Technology", "Location", "Concept").
         
         Return purely a JSON object. No markdown.
         Format:
         {
           "concepts": [
-            { "label": "Concept Name", "definition": "Brief definition" }
+            { "label": "Concept Name", "definition": "Brief definition", "category": "CategoryLabel" }
           ],
           "relationships": [
             { "source": "Concept Name", "target": "Concept Name", "relation": "relationship_label" }

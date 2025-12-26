@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Calendar, Clock, Edit2, Check, X, FileText, Brain, Share2, Layers } from "lucide-react";
 import ThreeDMindmap from "@/components/ThreeDMindmap";
+import StructuredMindmap from "@/components/StructuredMindmap";
 import CrystallizationWizard from "@/components/CrystallizationWizard";
 
 interface TimelineEvent {
@@ -57,6 +58,7 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
     const [activeTab, setActiveTab] = useState<"summary" | "map" | "crystallize">("summary");
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState("");
+    const [selectedNode, setSelectedNode] = useState<any>(null);
 
     useEffect(() => {
         if (!id) return;
@@ -239,12 +241,13 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
                         animate={{ opacity: 1, scale: 1 }}
                         exit={{ opacity: 0, scale: 0.95 }}
                     >
-                        <ThreeDMindmap
+                        <StructuredMindmap
+                            sessionTitle={summary.title}
                             graphData={summary.graph_data}
-                            onNodeClick={(node: any) => alert(`Clicked ${node.label}`)}
+                            onNodeClick={(node) => setSelectedNode(node)}
                         />
                         <div className="mt-4 text-center text-slate-400 text-sm">
-                            Full Knowledge Graph Context (Session View)
+                            Visual Knowledge Hierarchy (Structured View)
                         </div>
                     </motion.div>
                 )}
@@ -261,6 +264,51 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
                                 router.push('/');
                             }}
                         />
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Node Detail Modal */}
+            <AnimatePresence>
+                {selectedNode && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+                        onClick={() => setSelectedNode(null)}
+                    >
+                        <motion.div
+                            initial={{ scale: 0.95, y: 20 }}
+                            animate={{ scale: 1, y: 0 }}
+                            exit={{ scale: 0.95, y: 20 }}
+                            className="bg-slate-900 border border-slate-700 p-6 rounded-xl shadow-2xl max-w-lg w-full"
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <div className="flex justify-between items-start mb-4">
+                                <h3 className="text-xl font-bold text-white">{selectedNode.label}</h3>
+                                <button onClick={() => setSelectedNode(null)} className="text-slate-400 hover:text-white">
+                                    <X className="w-5 h-5" />
+                                </button>
+                            </div>
+                            <div className="prose prose-invert prose-sm max-h-[60vh] overflow-y-auto custom-scrollbar">
+                                <p className="text-slate-300 whitespace-pre-wrap mb-4">{selectedNode.summary || selectedNode.content || "No details available."}</p>
+
+                                {selectedNode.references && selectedNode.references.length > 0 && (
+                                    <div className="mt-4 pt-4 border-t border-slate-700">
+                                        <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">References</h4>
+                                        <div className="space-y-3">
+                                            {selectedNode.references.map((ref: any, idx: number) => (
+                                                <div key={idx} className="bg-slate-800/50 p-3 rounded-lg border border-slate-700/50">
+                                                    <div className="text-xs text-orange-400 font-bold mb-1">{ref.source}</div>
+                                                    <div className="text-xs text-slate-300 italic">"{ref.text}"</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </motion.div>
                     </motion.div>
                 )}
             </AnimatePresence>

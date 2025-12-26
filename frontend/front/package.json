@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@react-hook/window-size": "^3.1.1",
+    "@types/dagre": "^0.7.53",
     "clsx": "^2.1.1",
+    "dagre": "^0.8.5",
     "framer-motion": "^12.23.26",
     "lucide-react": "^0.562.0",
     "next": "16.1.0",
@@ -18,6 +20,7 @@
     "react-dom": "19.2.3",
     "react-force-graph-2d": "^1.29.0",
     "react-force-graph-3d": "^1.29.0",
+    "reactflow": "^11.11.4",
     "tailwind-merge": "^3.4.0",
     "three": "^0.182.0",
     "three-spritetext": "^1.10.0"
