@@ -18,13 +18,31 @@ class IngestionService:
             loader = PyPDFLoader(file_path)
             from langchain_text_splitters import RecursiveCharacterTextSplitter
             
-            # Fast and effective chunking for RAG
+            # Semantic-Aware Chunking (Layout Driven)
+            # We strictly prioritize structure (Headers > Paragraphs > Sentences)
             text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
+                chunk_size=2000, 
                 chunk_overlap=200,
-                add_start_index=True
+                add_start_index=True,
+                separators=[
+                    "\n\n",       # Standard Paragraph
+                    "\n### ",     # H3
+                    "\n## ",      # H2
+                    "\n# ",       # H1
+                    "\n***\n",    # Horizontal Rule
+                    ". "          # Sentence fallback
+                ],
+                strip_whitespace=True
             )
-            return loader.load_and_split(text_splitter)
+            
+            docs = loader.load()
+            # Basic Cleaning
+            for doc in docs:
+                doc.page_content = IngestionService._clean_text(doc.page_content)
+                
+            return text_splitter.split_documents(docs)
+
+
         
         elif file_type.startswith("image/"):
             return await IngestionService._describe_image(file_path)
@@ -61,3 +79,16 @@ class IngestionService:
             page_content=response.content,
             metadata={"source": image_path, "type": "image_description"}
         )]
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """
+        Basic cleanup for PDF text artifacts.
+        """
+        if not text: return ""
+        # Fix hyphenated words at line breaks (e.g. "comput-\n er" -> "computer")
+        import re
+        text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
+        # Collapse multiple spaces
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text

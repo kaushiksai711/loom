@@ -5,7 +5,7 @@ import { useWindowSize } from '@react-hook/window-size'; // Optional: for respon
 
 interface GraphNode extends NodeObject {
     id: string;
-    group: 'concept' | 'seed';
+    group: 'concept' | 'seed' | 'source' | 'session';
     status?: 'verified' | 'conflict' | 'neutral'; // Logic for "Toxic" edges
     val: number; // Influence size
 }
@@ -39,8 +39,12 @@ const GraphVisualization: React.FC<GraphProps> = ({ data, isCrystallized, onNode
             if (fg.d3AlphaDecay) setTimeout(() => fg.d3AlphaDecay(0.2), 1000);
         } else {
             // === SLIME MODE (Fluid, Organic) ===
-            fg.d3Force('charge')?.strength(-30);
-            fg.d3Force('link')?.strength(0.1);
+            // Tuned for "Dense Brain" Look
+            fg.d3Force('charge')?.strength(-60); // Moderate repulsion (was -120)
+            fg.d3Force('link')?.distance(40); // Pull related nodes closer
+            fg.d3Force('link')?.strength(0.2);
+            fg.d3Force('center', null); // Reset first? usually handled by default
+
             if (fg.d3VelocityDecay) fg.d3VelocityDecay(0.6);
             if (fg.d3AlphaDecay) fg.d3AlphaDecay(0);
 
@@ -54,15 +58,28 @@ const GraphVisualization: React.FC<GraphProps> = ({ data, isCrystallized, onNode
         // Safety Check: If physics hasn't started, x/y might be undefined
         if (typeof node.x !== 'number' || typeof node.y !== 'number') return;
 
-        const radius = Math.max(3, Math.sqrt(node.val) * 2);
+        // Size Tuning
+        const radius = Math.max(2, Math.sqrt(node.val) * 1.5); // Smaller nodes
         const isConflict = node.status === 'conflict';
+        const isSource = node.group === 'source'; // Different color for sources
 
         // Color Palette
-        const coreColor = isConflict ? 'rgba(255, 50, 50, 0.9)' : 'rgba(0, 255, 200, 0.9)'; // Red vs Teal
-        const glowColor = isConflict ? 'rgba(255, 50, 50, 0.2)' : 'rgba(0, 255, 200, 0.3)';
+        let coreColor = 'rgba(0, 255, 200, 0.9)'; // Teal (Default Concept)
+        let glowColor = 'rgba(0, 255, 200, 0.3)';
+
+        if (isConflict) {
+            coreColor = 'rgba(255, 50, 50, 0.9)';
+            glowColor = 'rgba(255, 50, 50, 0.2)';
+        } else if (isSource) {
+            coreColor = 'rgba(50, 150, 255, 0.9)'; // Blue for Sources
+            glowColor = 'rgba(50, 150, 255, 0.3)';
+        } else if (node.group === 'session') {
+            coreColor = 'rgba(255, 215, 0, 0.9)'; // Gold for Sessions (Hubs)
+            glowColor = 'rgba(255, 215, 0, 0.3)';
+        }
 
         // A. Outer Glow (The "Jelly")
-        const glowRadius = radius * 3;
+        const glowRadius = radius * 2.5; // Reduced glow
         const gradient = ctx.createRadialGradient(node.x, node.y, radius, node.x, node.y, glowRadius);
         gradient.addColorStop(0, glowColor);
         gradient.addColorStop(1, 'rgba(0,0,0,0)');
@@ -78,15 +95,23 @@ const GraphVisualization: React.FC<GraphProps> = ({ data, isCrystallized, onNode
         ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
         ctx.fill();
 
-        // Label (Only show on hover or high zoom)
-        if (globalScale > 1.5) {
+        // Label (Adaptive Visibility)
+        const showLabel = globalScale > 0.9 || data.nodes.length < 30; // Stricter visibility
+        if (showLabel) {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillStyle = 'rgba(255,255,255,0.8)';
-            ctx.font = `${12 / globalScale}px Sans-Serif`;
-            ctx.fillText(node.id, node.x, node.y + radius + 4);
+
+            // Text Background for readability
+            const label = node.label || node.id;
+            const textWidth = ctx.measureText(label).width;
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(node.x - textWidth / 2 - 2, node.y + radius + 2, textWidth + 4, 12);
+
+            ctx.fillStyle = 'rgba(255,255,255,0.9)';
+            ctx.font = `${10 / globalScale}px Sans-Serif`; // Finer font
+            ctx.fillText(label, node.x, node.y + radius + 8);
         }
-    }, []);
+    }, [data.nodes.length]);
 
     // 3. RENDER: CRYSTAL NODE (Geometric Diamond)
     const paintCrystal = useCallback((node: GraphNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
@@ -113,7 +138,7 @@ const GraphVisualization: React.FC<GraphProps> = ({ data, isCrystallized, onNode
         // Always show label in Crystal mode
         ctx.fillStyle = 'rgba(255,255,255, 1)';
         ctx.font = `bold ${14 / globalScale}px Sans-Serif`;
-        ctx.fillText(node.id, node.x, node.y + size + 6);
+        ctx.fillText(node.label || node.id, node.x, node.y + size + 6);
     }, []);
 
     return (
@@ -144,7 +169,7 @@ const GraphVisualization: React.FC<GraphProps> = ({ data, isCrystallized, onNode
                     const l = link as GraphLink;
                     if (l.type === 'CONTRADICTS') return '#FF0000'; // "Toxic" Edge
                     if (l.type === 'PREREQUISITE') return '#0088FF';
-                    return isCrystallized ? '#444455' : '#222233'; // Faint connections
+                    return isCrystallized ? '#444455' : 'rgba(0, 255, 255, 0.4)'; // Cyan "Synapse" Look
                 }}
 
                 // --- Interaction ---

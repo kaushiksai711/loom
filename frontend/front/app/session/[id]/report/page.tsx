@@ -3,7 +3,7 @@
 import { useEffect, useState, use } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { Calendar, Clock, Edit2, Check, X, FileText, Brain, Share2, Layers } from "lucide-react";
+import { Calendar, Clock, Edit2, Check, X, FileText, Brain, Share2, Layers, Download } from "lucide-react";
 import ThreeDMindmap from "@/components/ThreeDMindmap";
 import StructuredMindmap from "@/components/StructuredMindmap";
 import CrystallizationWizard from "@/components/CrystallizationWizard";
@@ -133,6 +133,13 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
                         <div className="bg-white/5 px-3 py-1 rounded-full border border-white/10">
                             {summary.evidence_count} Evidence
                         </div>
+                        <button
+                            onClick={() => window.location.href = `http://localhost:8000/api/v1/session/export/${id}/zip`}
+                            className="bg-white/5 hover:bg-white/10 px-3 py-1 rounded-full border border-white/10 flex items-center gap-2 transition-colors cursor-pointer group"
+                        >
+                            <Download className="w-4 h-4 text-green-400 group-hover:text-green-300" />
+                            <span className="text-slate-300 group-hover:text-white">Export ZIP</span>
+                        </button>
                     </div>
                 </div>
             </motion.div>

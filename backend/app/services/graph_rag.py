@@ -2,6 +2,10 @@ from typing import List, Dict
 from fastembed import TextEmbedding
 from backend.app.db.arango import db
 import datetime
+import json
+import re
+from backend.app.services.llm import get_llm
+from langchain_core.messages import HumanMessage, SystemMessage
 class GraphRAGService:
     def __init__(self):
         # Initialize FastEmbed (Lightweight, High Quality, Local)
@@ -44,7 +48,7 @@ class GraphRAGService:
         self.db.collection("Sessions").insert(doc)
         return session_id
 
-    async def hybrid_search(self, query: str, session_id: str = None, intent: str = "GENERAL", top_k: int = 5) -> List[Dict]:
+    async def hybrid_search(self, query: str, session_id: str = None, intent: str = "GENERAL", top_k: int = 5, allow_global_fallback: bool = True) -> List[Dict]:
         """
         Performs Real Hybrid RAG with Intent-Aware Routing.
          Intents:
@@ -74,20 +78,27 @@ class GraphRAGService:
         
         LET graph_results = (
             FOR start_node IN vector_results
-            FOR v, e, p IN 1..1 ANY start_node.doc GRAPH 'concept_graph'
+            // TRAVERSAL UPGRADE: 1..2 steps (Recursive)
+            FOR v, e, p IN 1..2 ANY start_node.doc GRAPH 'concept_graph'
             
-            // INTENT-AWARE BOOSTING
+            // INTENT-AWARE BOOSTING & FILTERING
+            // We want strong logical links, not just "related_to"
+            LET is_strong = e.type IN ['CAUSES', 'REQUIRES', 'PART_OF', 'CONTRADICTS', 'ENABLES']
+            
             LET boost = 
-                (@intent == 'FACT_CHECK' AND e.type == 'CONTRADICTS') ? 2.0 : 
-                (@intent == 'LEARNING' AND e.type == 'PREREQUISITE') ? 1.5 : 
+                (@intent == 'FACT_CHECK' AND e.type == 'CONTRADICTS') ? 2.5 : 
+                (@intent == 'LEARNING' AND e.type == 'PREREQUISITE') ? 2.0 : 
+                is_strong ? 1.5 :
                 1.0
                 
             SORT boost DESC
+            LIMIT 20 // Don't overwhelm context
             
             RETURN DISTINCT { doc: v, score: 0.5 * boost, type: 'graph_neighbor', edge_type: e.type }
         )
         
-        RETURN APPEND(vector_results, graph_results)
+        // Merge and Deduplicate
+        RETURN UNION(vector_results, graph_results)
         """
         
         # STRATEGY: Session Priority RAG
@@ -105,7 +116,8 @@ class GraphRAGService:
         if session_results and isinstance(session_results[0], list): session_results = session_results[0]
 
         # 2. If low confidence or few results, Fallback to Global (Serendipity)
-        if len(session_results) < 3:
+        # ONLY if allowed
+        if allow_global_fallback and len(session_results) < 3:
              # Search GLOBAL (exclude current session to avoid duplicates)
              # NOTE: For MVP, we just search everything with None, then dedup manually if needed
              # Or simply relax the filter.
@@ -150,7 +162,7 @@ class GraphRAGService:
         doc = cursor.next()
         return doc["_id"]
 
-    async def ingest_document(self, content: str, metadata: Dict):
+    async def ingest_document(self, content: str, metadata: Dict, extract_concepts: bool = True):
         """
         Embeds and stores a document (Seed) in ArangoDB.
         Links it to the Source Node (Anchor).
@@ -182,6 +194,313 @@ class GraphRAGService:
             "created_at": datetime.datetime.utcnow().isoformat()
         }
         self.db.collection("Relationships").insert(edge)
+
+        # 3. Aggressive Ingestion: Extract Concepts Immediately
+        # Only if flag is True (False when batching externally)
+        if extract_concepts:
+            # Use the "Best-in-Class" Legacy Prompt
+            print(f"--- Starting Immediate Extraction for {source_name} ---")
+            try:
+                 extract_content = content[:30000]
+                 session_id = metadata.get("session_id")
+                 extraction_result = await self.extract_session_concepts(extract_content, doc_id=source_id)
+                 
+                 if extraction_result and "concepts" in extraction_result:
+                     print(f"Extracted {len(extraction_result['concepts'])} concepts.")
+                     await self._store_extraction_results(extraction_result, source_id, session_id)
+
+            except TypeError as e:
+                print(f"CRITICAL: Method signature mismatch in extraction: {e}")
+            except Exception as e:
+                print(f"Error during immediate extraction: {e}") 
+
+    async def process_batch_extraction(self, full_text: str, source_name: str, session_id: str = None):
+        """
+        Batched Extraction: Splits text into large chunks (15k-20k) to maximize LLM context window
+        and minimize calls.
+        """
+        source_id = await self._ensure_source_node(source_name)
+        BATCH_SIZE = 30000
+        overlap = 1000
+        
+        total_len = len(full_text)
+        print(f"--- Starting Batch Extraction for {source_name} (Length: {total_len}) ---")
+        
+        for start in range(0, total_len, BATCH_SIZE - overlap):
+            end = min(start + BATCH_SIZE, total_len)
+            chunk_text = full_text[start:end]
+            
+            print(f"Processing batch {start}-{end}...")
+            try:
+                extraction_result = await self.extract_session_concepts(chunk_text, doc_id=source_id)
+                if extraction_result and "concepts" in extraction_result:
+                     print(f"Extracted {len(extraction_result['concepts'])} concepts from batch.")
+                     await self._store_extraction_results(extraction_result, source_id, session_id)
+                     
+            except Exception as e:
+                print(f"Error processing batch {start}: {e}")
+            
+            if end >= total_len:
+                break
+            
+            # Rate Limit Protection: Wait 5 seconds between batches
+            import asyncio
+            print("Throttling: Waiting 5s to respect Rate Limits...")
+            await asyncio.sleep(5)
+
+
+    async def extract_session_concepts(self, text_block: str, doc_id: str = "unknown") -> Dict:
+        """
+        Uses the 'Best-in-Class' Legacy Prompt to extract rich concepts.
+        """
+        # SAFEGUARD: If text extraction failed (empty PDF/image), 
+        # do NOT call LLM, or it will hallucinate based on System Prompt.
+        if not text_block or len(text_block.strip()) < 50:
+            print(f"Skipping Extraction: Text block too short ({len(text_block) if text_block else 0} chars). content: '{text_block}'")
+            return {}
+
+        llm = get_llm()
+        
+        # The Legacy Prompt (Ported from extract_prompt_2.txt)
+        prompt_text = f"""
+## SYSTEM:
+You are a Senior Technical Architect analyzing complex blueprint documentation.
+The user will provide a **TEXT FRAGMENT** from a Technical Specification or Research Paper.
+
+**YOUR OBJECTIVE**: Extract core architectural components, frameworks, data structures, and algorithms.
+**NEGATIVE CONSTRAINTS**:
+- DO NOT extract generic business terms (e.g., "Customer Segmentation", "Marketing", "ROI") unless they are the *explicit technical subject*.
+- DO NOT extract generic verbs as concepts (e.g., "Improve", "Analyze").
+- DO NOT hallucinate. If the text is a fragment of a sentence, ignore it.
+
+If the text contains no significant technical concepts, return empty JSON: {{ "concepts": [] }}.
+
+Ensure relation targets match exact concept names where possible.
+Read the document text and output ONLY JSON that conforms to this enhanced hierarchy:
+
+```json
+{{
+  "domain": "string - inferred domain",
+  "concepts": [
+    {{
+      "name": "Concept Name",
+      "concept_type": "Definition|Concept|Framework|Model|Methodology|Process|Tool|Metric|Role|Task|Event",
+      
+      "operational_details": {{
+        "practical_measures": ["specific actionable steps"],
+        "implementation_steps": ["how to execute"],
+        "resources_required": ["tools, budget"],
+        "success_criteria": ["measurable outcomes"]
+      }},
+      
+      "contextual_examples": {{
+        "real_world_cases": ["examples mentioned"],
+        "quantitative_data": ["stats, numbers"]
+      }},
+      
+      "relations": [
+        {{
+          "type": "causes|mitigates|part-of|related-to|enables|requires|triggers|supports|coordinates-with|reports-to",
+          "target": "target concept name",
+          "note": "nature of relationship",
+          "strength": "strong|moderate"
+        }}
+      ],
+      
+      "sub_concepts": [
+        {{
+          "name": "SubConcept Name",
+          "explanation": "purpose",
+          "sub_type": "Phase|Step|Metric|Rule"
+        }}
+      ]
+    }}
+  ]
+}}
+```
+
+## OUTPUT REQUIREMENTS:
+- Return valid JSON only. No markdown formatting.
+- Extract BOTH high-level concepts AND operational details.
+- Map not just what relates to what, but HOW (relations).
+
+## USER MESSAGE:
+Document ID: {doc_id}
+Document text:
+\"\"\"
+{text_block}
+\"\"\"
+        """
+        
+        # LOGGING PROMPT (User Request)
+        try:
+            with open("d:\\major_project\\log.txt", "a", encoding="utf-8") as f:
+                f.write(f"\n\n--- [PROMPT] {datetime.datetime.now().isoformat()} ---\n{prompt_text}\n----------------------------------\n")
+        except Exception as e:
+            print(f"Log Error: {e}")
+
+        max_retries = 5
+        base_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                response = await llm.ainvoke([HumanMessage(content=prompt_text)])
+                content = response.content.strip()
+                
+                # LOGGING RESPONSE (User Request)
+                try:
+                    with open("d:\\major_project\\log.txt", "a", encoding="utf-8") as f:
+                        f.write(f"\n--- [RESPONSE] {datetime.datetime.now().isoformat()} ---\n{content}\n==================================\n")
+                except Exception as e:
+                    print(f"Log Error: {e}")
+                
+                print(f"DEBUG: Raw LLM Response (First 500 chars): {content[:500]}") # DEBUGGING
+
+                # Clean JSON markdown if present
+                content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
+                
+                return json.loads(content)
+            
+            except Exception as e:
+                error_str = str(e).lower()
+                if "429" in error_str or "rate limit" in error_str:
+                    delay = base_delay * (2 ** attempt)
+                    print(f"WARNING: LLM Rate Limit (429). Retrying in {delay}s... (Attempt {attempt+1}/{max_retries})")
+                    import asyncio
+                    await asyncio.sleep(delay)
+                else:
+                    # Non-retriable error
+                    print(f"LLM Extraction failed: {e}")
+                    return {}
+        
+        print(f"ERROR: Max retries exceeded for doc {doc_id}. Skipping.")
+        return {}
+
+    async def _store_extraction_results(self, data: Dict, source_id: str, session_id: str = None):
+        """
+        Writes the rich extracted data to ArangoDB.
+        """
+        if not data or "concepts" not in data: return
+
+        print(f"Storing {len(data['concepts'])} concepts...")
+        
+        # 1. Ensure Collections Exist
+        if not self.db.has_collection("Concepts"):
+            self.db.create_collection("Concepts")
+            
+        if not self.db.has_collection("Relationships"):
+            self.db.create_collection("Relationships", edge=True)
+            
+        if session_id and not self.db.has_collection("ConceptSessionLinks"):
+             self.db.create_collection("ConceptSessionLinks", edge=True)
+
+        # 2. Ensure Session Node if exists
+        if session_id:
+             # Basic upsert for session node to ensure it exists
+             self.db.collection("Sessions").insert({"_key": session_id, "type": "session"}, overwrite=True)
+
+        for concept in data["concepts"]:
+            # Sanitize Key
+            key = re.sub(r"[^a-zA-Z0-9_-]", "_", concept["name"]).lower()
+            
+            # Prepare Doc
+            doc = {
+                "_key": key,
+                "label": concept["name"], # Use 'label' for visualization
+                "name": concept["name"],
+                "type": "concept", # Standard type
+                "concept_type": concept.get("concept_type", "Concept"),
+                "definition": concept.get("operational_details", {}).get("implementation_steps", [""])[0] if concept.get("operational_details") else "",
+                "operational_details": concept.get("operational_details", {}),
+                "contextual_examples": concept.get("contextual_examples", {}),
+                "sub_concepts_raw": concept.get("sub_concepts", []), # Store raw for now
+                "domain": data.get("domain", "General"),
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "val": 10 # Importance boost for these high-quality nodes
+            }
+            
+            # Upsert Concept - Smart Merge (Update)
+            # overwrite_mode='update' ensures we merge new fields into existing ones
+            # instead of replacing the whole document.
+            self.db.collection("Concepts").insert(doc, overwrite_mode='update')
+            
+            # Link to Source
+            self.db.collection("Relationships").insert({
+                "_from": source_id, 
+                "_to": f"Concepts/{key}",
+                "type": "MENTIONS",
+                "created_at": datetime.datetime.utcnow().isoformat()
+            })
+            
+            # Link to Session
+            if session_id:
+                self.db.collection("ConceptSessionLinks").insert({
+                    "_from": f"Concepts/{key}",
+                    "_to": f"Sessions/{session_id}",
+                    "relation": "CREATED_IN",
+                    "created_at": datetime.datetime.utcnow().isoformat()
+                })
+                
+            # Process Relations
+            for rel in concept.get("relations", []):
+                target_key = re.sub(r"[^a-zA-Z0-9_-]", "_", rel["target"]).lower()
+                # We can't guarantee target exists yet. 
+                # Strategy: Insert "Stub" for target? Or just ignore?
+                # Better: Insert Stub.
+                # Strategically Insert Stub: Ignore if exists (keep original rich node)
+                try:
+                    self.db.collection("Concepts").insert({
+                        "_key": target_key, 
+                        "label": rel["target"], 
+                        "type": "concept", 
+                        "stub": True
+                    }, overwrite=False) 
+                except Exception:
+                    # Ignore 409 (Duplicate) - Node exists, likely richer than our stub
+                    pass
+                
+                # Create Edge
+                edge_type = rel.get("type", "RELATED_TO").upper().replace("-", "_")
+                self.db.collection("Relationships").insert({
+                    "_from": f"Concepts/{key}",
+                    "_to": f"Concepts/{target_key}",
+                    "type": edge_type,
+                    "note": rel.get("note", ""),
+                    "confidence": "high" if rel.get("strength") == "strong" else "medium"
+                })
+
+            # Process Sub-Concepts (Granularity Expansion)
+            for sub in concept.get("sub_concepts", []):
+                sub_name = sub.get("name")
+                if not sub_name: continue
+
+                sub_key = re.sub(r"[^a-zA-Z0-9_-]", "_", sub_name).lower()
+                
+                # Upsert Sub-Concept Node
+                sub_doc = {
+                    "_key": sub_key,
+                    "label": sub_name,
+                    "name": sub_name,
+                    "type": "sub_concept", # Distinct type for filtering/visuals
+                    "definition": sub.get("explanation", ""),
+                    "sub_type": sub.get("sub_type", "Component"),
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "val": 5 # Smaller visual size
+                }
+                
+                # Careful Upsert: Don't overwrite if it exists as a full concept
+                try:
+                    self.db.collection("Concepts").insert(sub_doc, overwrite_mode='update')
+                except Exception:
+                    pass
+
+                # Link Parent -> Sub-Concept (HAS_PART)
+                self.db.collection("Relationships").insert({
+                    "_from": f"Concepts/{key}",
+                    "_to": f"Concepts/{sub_key}",
+                    "type": "HAS_PART",
+                    "created_at": datetime.datetime.utcnow().isoformat()
+                })
 
     async def add_user_seed(self, text: str, comment: str, confidence: str, session_id: str = None):
         """
@@ -303,7 +622,8 @@ class GraphRAGService:
                 # create RELATED_TO edge
                 # Check if edge exists first to avoid dupes
                 # (Skipped check for speed, Arango ignores duplicate _key if we set it deterministically, or we just insert)
-                print(f"   -> Linking Seed '{seed['text'][:20]}...' to Concept '{cand['label']}' (Score: {cand['score']:.2f})")
+                preview_text = seed.get('highlight', seed.get('text', ''))
+                print(f"   -> Linking Seed '{preview_text[:20]}...' to Concept '{cand['label']}' (Score: {cand['score']:.2f})")
                 
                 edge = {
                     "_from": seed['_id'],
@@ -483,19 +803,27 @@ class GraphRAGService:
                  # 1. Save Concepts
                  concept_map = {} # label -> _id
                  for c in extracted_data:
+                     # Schema Matcher: Legacy Prompt uses 'name', Old uses 'label'
+                     label = c.get('name') or c.get('label', 'Unknown Concept')
+                     
+                     # Definition Extraction
+                     definition = c.get('definition', "")
+                     if not definition and c.get('operational_details'):
+                         definition = c.get('operational_details', {}).get("implementation_steps", [""])[0]
+                     
                      doc = {
-                         "text": c.get("text") or f"{c['label']}: {c['definition']}",
-                         "label": c['label'],
-                         "definition": c['definition'],
+                         "text": c.get("text") or f"{label}: {definition}",
+                         "label": label,
+                         "definition": definition,
                          "type": "extracted_concept",
                          "session_id": session_id,
                          "created_at": datetime.datetime.utcnow().isoformat(),
-                         "embedding": self.embed_query(c['label']).tolist() 
+                         "embedding": self.embed_query(label).tolist() 
                      }
                      meta = self.db.collection("UserSeeds").insert(doc)
                      doc["_id"] = meta["_id"]
                      extracted_concepts.append(doc)
-                     concept_map[c['label']] = meta["_id"]
+                     concept_map[label] = meta["_id"]
                      
                  # 2. Save Relationships (as special seeds for now, or just edge logic)
                  # We'll save them as UserSeeds type='extracted_relation' to persist them
@@ -656,62 +984,6 @@ class GraphRAGService:
             }
         }
 
-    async def extract_session_concepts(self, text: str) -> Dict:
-        """
-        Uses LLM to extract top 5-10 core concepts AND their relationships.
-        """
-        from backend.app.services.llm import get_llm
-        from langchain_core.messages import HumanMessage, SystemMessage
-        import json
-        
-        llm = get_llm()
-        
-        # Guard for empty text
-        if not text or len(text) < 50:
-            return {"concepts": [], "relationships": []}
-            
-        sys_prompt = """You are an expert Ontology Engineer. 
-        Analyze the provided text to construct a Knowledge Graph.
-        
-        1. Identify the Top 5-10 Core Concepts (Entities, Topics).
-        2. Identify logical Relationships between them (e.g., "enables", "is_part_of", "contradicts").
-        3. Assign a general Category to each concept (e.g., "Organization", "Person", "Event", "Technology", "Location", "Concept").
-        
-        Return purely a JSON object. No markdown.
-        Format:
-        {
-          "concepts": [
-            { "label": "Concept Name", "definition": "Brief definition", "category": "CategoryLabel" }
-          ],
-          "relationships": [
-            { "source": "Concept Name", "target": "Concept Name", "relation": "relationship_label" }
-          ]
-        }
-        """
-        
-        try:
-            response = await llm.ainvoke([
-                SystemMessage(content=sys_prompt),
-                HumanMessage(content=f"Text to Analyze:\n{text[:15000]}")
-            ])
-            
-            content = response.content.replace("```json", "").replace("```", "").strip()
-            data = json.loads(content)
-            
-            # Enrich concepts
-            concepts = data.get("concepts", [])
-            for c in concepts:
-                c['type'] = 'extracted_concept'
-                c['text'] = f"{c['label']}: {c['definition']}"
-                
-            return {
-                "concepts": concepts,
-                "relationships": data.get("relationships", [])
-            }
-            
-        except Exception as e:
-            print(f"LLM Extraction Failed: {e}")
-            return {"concepts": [], "relationships": []}
 
     async def update_session_content(self, session_id: str, item_id: str, new_content: str):
         """
@@ -787,7 +1059,7 @@ class GraphRAGService:
                  extracted = await self.extract_session_concepts(full_text)
                  # Add to candidates temporarily (don't save here, save on commit? no, save here for consistency?)
                  # For preview, just use them.
-                 candidates_to_process.extend(extracted)
+                 candidates_to_process.extend(extracted.get('concepts', []))
         
         # 3. Process Candidates (Link to Global Knowledge)
         merges = []
@@ -956,11 +1228,102 @@ class GraphRAGService:
                 UPDATE doc WITH { mastery: MIN([1.0, (doc.mastery || 0) + 0.05]) } IN Concepts
             """, bind_vars={"target_id": target_id})
 
+        # 3. Form Synapses (Auto-Association)
+        await self._form_synapses(created_concepts, session_id)
+
         self.db.aql.execute("""
             UPDATE @key WITH { status: 'crystallized', finalized_at: DATE_ISO8601(DATE_NOW()) } IN Sessions
         """, bind_vars={"key": session_id})
         
-        return {"status": "success", "message": "Session Crystallized"}
+        return {"status": "success", "message": "Session Crystallized with Synaptic Connections"}
+
+    async def _form_synapses(self, new_concepts: List[Dict], session_id: str):
+        """
+        Smart Synapse Formation (Neuro-Symbolic).
+        1. Find Vector Candidates (Broad Recall, >0.75)
+        2. LLM Verification (Precision & Typing)
+        """
+        from backend.app.services.llm import get_llm
+        from langchain_core.messages import HumanMessage, SystemMessage
+        import json
+        
+        llm = get_llm()
+        print(f"[{session_id}] Form Synapses (Smart Mode) for {len(new_concepts)} new concepts...")
+        
+        for concept in new_concepts:
+            # Skip if no embedding
+            if 'embedding' not in concept or not concept['embedding']:
+                continue
+            
+            label = concept.get('label', 'Unknown')
+            # 1. Vector Search (Broad)
+            aql = """
+            FOR doc IN Concepts
+                FILTER doc._id != @concept_id
+                LET score = COSINE_SIMILARITY(doc.embedding, @embedding)
+                FILTER score > 0.75
+                SORT score DESC
+                LIMIT 8
+                RETURN { label: doc.label, id: doc._id, definition: doc.definition }
+            """
+            
+            cursor = self.db.aql.execute(aql, bind_vars={
+                "concept_id": concept['_id'],
+                "embedding": concept['embedding']
+            })
+            
+            candidates = list(cursor)
+            if not candidates: continue
+            
+            # 2. LLM Verification
+            candidate_labels = [c['label'] for c in candidates]
+            
+            prompt = f"""
+            I have a new concept: "{label}" (Definition: {concept.get('definition', '')})
+            
+            Here are existing concepts in the brain:
+            {json.dumps(candidate_labels)}
+            
+            Identify valid, logical relationships. 
+            Return a JSON array of objects: [ {{ "target": "Existing Label", "relation": "is_part_of" | "enables" | "contradicts" | "requires" | "related_to" }} ]
+            Only return strong, factual connections. If none, return [].
+            """
+            
+            try:
+                response = await llm.ainvoke([
+                    SystemMessage(content="You are a Knowledge Graph Architect. Output strictly JSON."),
+                    HumanMessage(content=prompt)
+                ])
+                
+                content = response.content.replace("```json", "").replace("```", "").strip()
+                connections = json.loads(content)
+                
+                # 3. Create Verified Edges
+                for conn in connections:
+                    target_label = conn.get('target')
+                    relation_type = conn.get('relation', 'related_to').upper().replace(' ', '_')
+                    
+                    # Find target ID
+                    target_match = next((c for c in candidates if c['label'] == target_label), None)
+                    
+                    if target_match:
+                         edge = {
+                            "_from": concept['_id'],
+                            "_to": target_match['id'],
+                            "type": relation_type,
+                            "source": "smart_synapse",
+                            "created_at": "now"
+                        }
+                         # Safe Insert
+                         try:
+                             self.db.collection("Relationships").insert(edge)
+                             print(f"   -> Synapse Verified: '{label}' --[{relation_type}]--> '{target_label}'")
+                         except:
+                             pass
+                             
+            except Exception as e:
+                print(f"   ⚠️ Synapse LLM Error: {e}")
+                # Fallback to vector links? No, stick to high precision for now.
 
     async def generate_mermaid_diagram(self, session_id: str) -> str:
         """
@@ -1028,3 +1391,51 @@ class GraphRAGService:
             
         return "\n".join(md)
 
+    async def get_global_graph(self, limit: int = 50, offset: int = 0, session_id: str = None):
+        """
+        Fetches the 'Global Brain' visualization data.
+        Smart Layering:
+        - If session_id provided: ALWAYS returns concepts from that session (Context).
+        - Then fills remainder of 'limit' with Top Global Concepts by 'val'.
+        """
+        aql = """
+        // 1. Get Session-Specific Concepts (Priority)
+        LET session_nodes = (
+            FILTER @session_id != null
+            FOR v, e IN 1..1 OUTBOUND CONCAT('Sessions/', @session_id) ConceptSessionLinks
+                RETURN v
+        )
+
+        // 2. Get Top Global Influential Concepts
+        LET global_nodes = (
+            FOR doc IN Concepts
+                SORT doc.val DESC
+                LIMIT @offset, @limit
+                RETURN doc
+        )
+        
+        // 3. Merge and Unique
+        LET all_nodes = (
+            FOR n IN UNION(session_nodes, global_nodes)
+                RETURN DISTINCT n
+        )
+        // Apply limit again to prevent explosion? No, user wants session context + global context.
+        // We let session nodes exceed limit if necessary.
+
+        LET top_ids = all_nodes[*]._id
+
+        // 4. Get ALL relationships strictly between these nodes (Mesh)
+        LET internal_edges = (
+            FOR start_node IN all_nodes
+                FOR v, e, p IN 1..1 ANY start_node GRAPH 'concept_graph'
+                // Ensure target is also in our active list
+                FILTER e._from IN top_ids AND e._to IN top_ids
+                RETURN DISTINCT e
+        )
+
+        RETURN { nodes: all_nodes, links: internal_edges }
+        """
+        
+        cursor = self.db.aql.execute(aql, bind_vars={"limit": limit, "offset": offset, "session_id": session_id})
+        result = list(cursor)
+        return result[0] if result else {"nodes": [], "links": []}

@@ -32,7 +32,14 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form(None)
         rag_service = GraphRAGService()
         
         ingested_count = 0
+        ingested_count = 0
+        full_text_buffer = []
+
         for doc in documents:
+            # Aggregate text for batch extraction
+            full_text_buffer.append(doc.page_content)
+
+            # Ingest Seed (Vector) - Disable per-chunk extraction!
             await rag_service.ingest_document(
                 content=doc.page_content,
                 metadata={
@@ -42,9 +49,20 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form(None)
                     "chunk_id": doc.metadata.get("start_index", 0),
                     "type": "document_chunk",
                     "session_id": session_id 
-                }
+                },
+                extract_concepts=False # <--- CRITICAL: Don't extract per chunk (Wasteful)
             )
             ingested_count += 1
+        
+        # 3. Trigger Batch Extraction (One-Shot or Sliding Window)
+        if full_text_buffer:
+            full_text = "\n".join(full_text_buffer)
+            # This handles slicing into 20k batches internally
+            await rag_service.process_batch_extraction(
+                full_text=full_text, 
+                source_name=file.filename,
+                session_id=session_id
+            )
         
         # Cleanup
         # os.remove(file_path) # Keep for debugging for now

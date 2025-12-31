@@ -8,6 +8,8 @@ import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import ChatInterface, { ChatIntent } from "@/components/ChatInterface";
+import RightSidebar from "@/components/RightSidebar";
+import { AvatarState } from "@/components/AvatarSlime";
 
 // Dynamically import GraphVisualization to avoid SSR issues with Canvas
 const GraphVisualization = dynamic(() => import("@/components/GraphVisualization"), {
@@ -39,6 +41,18 @@ export default function Home() {
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [evidenceHistory, setEvidenceHistory] = useState<any[]>([]);
 
+  // Avatar & Alert State
+  const [avatarState, setAvatarState] = useState<AvatarState>('IDLE');
+  const [alerts, setAlerts] = useState<any[]>([]);
+
+  // Derived Metrics
+  const metrics = {
+    concepts: graphData.nodes.filter(n => n.group === 'concept').length,
+    sources: evidenceHistory.length,
+    confidence: Math.round(graphData.nodes.reduce((acc, n) => acc + (n.status === 'verified' ? 100 : n.status === 'conflict' ? 0 : 50), 0) / (graphData.nodes.length || 1)),
+    gaps: graphData.nodes.filter(n => n.status === 'conflict').length
+  };
+
   useEffect(() => {
     if (showUpload || uploadStatus?.type === 'success') {
       fetch("http://127.0.0.1:8000/api/v1/ingest/history")
@@ -51,10 +65,14 @@ export default function Home() {
   // Handlers
   const handleSendMessage = async (msg: string, intent: ChatIntent) => {
     setIsLoading(true);
+    setAvatarState('LISTENING');
     // Optimistic UI
     setMessages(prev => [...prev, { role: 'user', content: msg }]);
 
     try {
+      // Transition to THINKING after a brief delay
+      setTimeout(() => setAvatarState('THINKING'), 500);
+
       const res = await fetch("http://127.0.0.1:8000/api/v1/session/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -70,17 +88,44 @@ export default function Home() {
       // 1. Update Chat
       setMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
 
-      // 2. Update Graph (The Avatar Reacts)
+      // 2. Update Graph (Avatar Analysis) & State
       if (data.context && Array.isArray(data.context)) {
         updateGraphFromContext(data.context);
+
+        // Push Alert if Insight or Conflict found
+        const conflict = data.context.find((c: any) => c.edge_type === 'CONTRADICTS');
+        if (conflict) {
+          setAvatarState('ALERT');
+          setAlerts(prev => [{
+            id: Date.now().toString(),
+            type: 'conflict',
+            title: 'Contradiction Detected',
+            message: `New evidence conflicts with ${conflict.doc.label || 'existing knowledge'}`,
+            timestamp: new Date()
+          }, ...prev]);
+        } else if (data.context.some((c: any) => c.score > 0.85)) {
+          setAvatarState('INSIGHT');
+        } else {
+          setAvatarState('IDLE');
+        }
+      } else {
+        setAvatarState('IDLE');
       }
 
     } catch (err) {
       console.error("Chat Failed", err);
       setMessages(prev => [...prev, { role: 'assistant', content: "Error: Neural Link Severed." }]);
+      setAvatarState('ALERT');
     } finally {
       setIsLoading(false);
+      // Fallback to idle after 3s if no other state
+      setTimeout(() => setAvatarState(prev => prev === 'ALERT' ? prev : 'IDLE'), 3000);
     }
+  };
+
+  const clearAlert = (id: string) => {
+    setAlerts(prev => prev.filter(a => a.id !== id));
+    if (avatarState === 'ALERT') setAvatarState('IDLE');
   };
 
   const handleCreateSession = async () => {
@@ -156,6 +201,62 @@ export default function Home() {
   };
 
   // Helper to transform RAG context into Graph Data
+  // Brain Layer State
+  const [brainLayer, setBrainLayer] = useState<'layer1' | 'layer2'>('layer1');
+  const [isGraphLoading, setIsGraphLoading] = useState(false);
+
+  // Initial Data Fetch: Global Brain & History
+  useEffect(() => {
+    fetchGlobalGraph('layer1');
+
+    // Fetch History for Stats
+    fetch("http://127.0.0.1:8000/api/v1/ingest/history")
+      .then(res => res.json())
+      .then(data => setEvidenceHistory(data))
+      .catch(err => console.error("Failed to load history:", err));
+  }, []);
+
+  const fetchGlobalGraph = async (layer: 'layer1' | 'layer2') => {
+    setIsGraphLoading(true);
+    // Layer 1 = Top 50, Layer 2 = Top 1000 (Full)
+    const limit = layer === 'layer1' ? 50 : 1000;
+
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/v1/session/global/graph?limit=${limit}&session_id=${sessionID}`);
+      const data = await res.json();
+
+      // Transform ArangoDB graph to React Flow format
+      const nodes = data.nodes.map((n: any) => ({
+        id: n._id, // Use ArangoID as unique ID
+        label: n.label || n._id.split('/')[1],
+        // Updated Group Mapping: Source | Session | Concept
+        group: n.type === 'source' ? 'source' : (n.type === 'session_node' ? 'session' : 'concept'),
+        val: n.type === 'session_node' ? 20 : (n.val || 5), // Boost Session Nodes
+        status: n.status || 'neutral',
+        citation: `Global Influence: ${n.val ?? 'N/A'}`,
+        sourceText: n.definition || n.text || n.description || n.highlight || "Content not available in graph node."
+      }));
+
+      const links = data.links.map((e: any) => ({
+        source: e._from,
+        target: e._to,
+        type: e.type
+      }));
+
+      setGraphData({ nodes, links });
+      setBrainLayer(layer);
+    } catch (e) {
+      console.error("Failed to fetch global brain:", e);
+    } finally {
+      setIsGraphLoading(false);
+    }
+  };
+
+  const toggleBrainLayer = () => {
+    const nextLayer = brainLayer === 'layer1' ? 'layer2' : 'layer1';
+    fetchGlobalGraph(nextLayer);
+  };
+
   // Helper to transform RAG context into Graph Data
   const updateGraphFromContext = (contextItems: any[]) => {
     setGraphData(prev => {
@@ -168,7 +269,6 @@ export default function Home() {
 
         // Use label, or ArangoDB _id, or fallback to a snippet of the text
         const id = doc.label || doc._id || (doc.highlight ? doc.highlight.substring(0, 20) + "..." : "Unknown Concept");
-
         // Citation Logic
         let citation = "System Memory";
         if (doc.source) {
@@ -218,6 +318,9 @@ export default function Home() {
   const [selectedNode, setSelectedNode] = useState<any>(null); // For "Explainability" Panel
   const [showSource, setShowSource] = useState(false); // Toggle for Inspection
 
+  // Right Panel View State
+  const [activeRightView, setActiveRightView] = useState<'AVATAR' | 'GRAPH'>('AVATAR');
+
   // Resizing Logic
   const handleDrag = (e: React.MouseEvent) => {
     if (!isDragging) return;
@@ -226,8 +329,6 @@ export default function Home() {
   };
 
   const stopDrag = () => setIsDragging(false);
-
-  // ... (handleSendMessage remains same) ...
 
   const handleNodeClick = (node: any) => {
     console.log("Node Clicked:", node);
@@ -248,22 +349,44 @@ export default function Home() {
           <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-teal-400 to-purple-500">
             Mission Control
           </h1>
-          <p className="text-xs text-slate-500">
-            Session:
-            <input
-              type="text"
-              value={sessionID}
-              onChange={(e) => setSessionID(e.target.value)}
-              className="bg-transparent border-b border-white/20 text-slate-300 focus:outline-none focus:border-teal-400 w-32 px-1 mx-1 text-center"
-            />
-            • Status: <span className={isCrystallized ? "text-purple-400" : "text-green-400"}>
-              {isCrystallized ? "CRYSTALLIZED" : "ACTIVE (FLUID)"}
-            </span>
-          </p>
+          <div className="flex items-center gap-3">
+            <p className="text-xs text-slate-500">
+              Global Brain •
+              Status: <span className={isCrystallized ? "text-purple-400" : "text-green-400"}>
+                {isCrystallized ? "CRYSTALLIZED" : "ACTIVE (FLUID)"}
+              </span>
+            </p>
+            {/* Session ID Badge (Restored for Extension Linking) */}
+            <div
+              className="px-2 py-1 rounded bg-white/5 border border-white/10 text-[10px] font-mono text-slate-400 cursor-pointer hover:bg-white/10 hover:text-white transition-colors"
+              onClick={() => { navigator.clipboard.writeText(sessionID); alert("Session ID copied!"); }}
+              title="Click to Copy for Chrome Extension"
+            >
+              ID: {sessionID}
+            </div>
+          </div>
         </div>
 
         {/* Actions */}
         <div className="flex gap-2">
+          {/* Layer Toggle */}
+          <button
+            onClick={toggleBrainLayer}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border flex items-center gap-2 transition-colors ${brainLayer === 'layer2'
+              ? 'bg-purple-500/20 text-purple-300 border-purple-500/30'
+              : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'
+              }`}
+          >
+            {isGraphLoading ? (
+              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+            ) : (
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+            )}
+            {brainLayer === 'layer1' ? "Show Full Brain" : "Show Top 50"}
+          </button>
+
           <button
             onClick={handleCreateSession}
             className="px-3 py-1.5 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 text-xs font-medium text-teal-300 border border-teal-500/20 flex items-center gap-2 transition-colors"
@@ -308,28 +431,63 @@ export default function Home() {
           <div className="w-0.5 h-8 bg-white/20 rounded-full" />
         </div>
 
-        {/* Right Panel: Graph */}
-        <div style={{ width: `${100 - leftPanelWidth}%` }} className="h-full min-h-0 pl-2 relative group flex-1">
-          <div className="absolute inset-0 bg-gradient-to-tr from-teal-900/10 to-purple-900/10 rounded-xl overflow-hidden border border-white/5">
-            <GraphVisualization
-              data={graphData}
-              isCrystallized={isCrystallized}
-              onNodeClick={handleNodeClick}
-            />
+        {/* Right Panel: Tabbed View (Avatar vs Graph) */}
+        <div style={{ width: `${100 - leftPanelWidth}%` }} className="h-full min-h-0 pl-2 relative group flex-1 flex flex-col gap-2">
+
+          {/* View Toggle Tabs */}
+          <div className="flex bg-slate-900/50 p-1 rounded-lg border border-white/5 shrink-0 self-start">
+            <button
+              onClick={() => setActiveRightView('AVATAR')}
+              className={`px-3 py-1 rounded text-xs font-bold transition-all ${activeRightView === 'AVATAR' ? 'bg-teal-500/20 text-teal-300 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
+            >
+              System State
+            </button>
+            <button
+              onClick={() => setActiveRightView('GRAPH')}
+              className={`px-3 py-1 rounded text-xs font-bold transition-all ${activeRightView === 'GRAPH' ? 'bg-purple-500/20 text-purple-300 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
+            >
+              Knowledge Graph
+            </button>
           </div>
 
-          {/* System Info Overlay */}
-          <div className="absolute bottom-4 right-4 text-right pointer-events-none">
-            <div className="text-xs text-white/30 font-mono">
-              System Entropy: {isCrystallized ? "0.01" : "0.85"}
+          {/* 1. Avatar Stats Panel (Full Height if Active) */}
+          {activeRightView === 'AVATAR' && (
+            <div className="flex-1 min-h-0 animate-in fade-in duration-300">
+              <RightSidebar
+                avatarState={avatarState}
+                metrics={metrics}
+                alerts={alerts}
+                onClearAlert={clearAlert}
+              />
             </div>
-          </div>
+          )}
+
+          {/* 2. Global Graph (Full Height if Active) */}
+          {activeRightView === 'GRAPH' && (
+            <div className="flex-1 min-h-0 bg-gradient-to-tr from-teal-900/10 to-purple-900/10 rounded-xl overflow-hidden border border-white/5 relative animate-in fade-in duration-300">
+              <GraphVisualization
+                data={graphData}
+                isCrystallized={isCrystallized}
+                onNodeClick={handleNodeClick}
+              />
+
+              {/* System Info Overlay */}
+              <div className="absolute bottom-4 right-4 text-right pointer-events-none">
+                <div className="text-xs text-white/30 font-mono">
+                  Layer: {brainLayer === 'layer1' ? 'Top 50' : 'Full'}
+                </div>
+                <div className="text-[10px] text-white/20 font-mono mt-1">
+                  Nodes: {graphData.nodes.length}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Node Explanation Overlay */}
           {selectedNode && !isCrystallized && (
-            <div className="absolute top-4 right-4 w-80 glass-card p-4 rounded-xl border border-white/10 shadow-2xl backdrop-blur-xl animate-in fade-in slide-in-from-right-10 flex flex-col max-h-[80vh]">
+            <div className="absolute top-4 right-4 w-80 glass-card p-4 rounded-xl border border-white/10 shadow-2xl backdrop-blur-xl animate-in fade-in slide-in-from-right-10 flex flex-col max-h-[80vh] z-50">
               <div className="flex justify-between items-start mb-2 shrink-0">
-                <h3 className="font-bold text-white text-lg leading-tight truncate pr-2">{selectedNode.id}</h3>
+                <h3 className="font-bold text-white text-lg leading-tight truncate pr-2">{selectedNode.label || selectedNode.id.split('/').pop()}</h3>
                 <button onClick={() => setSelectedNode(null)} className="text-slate-400 hover:text-white">×</button>
               </div>
 
@@ -349,7 +507,7 @@ export default function Home() {
                   <>
                     <p className="text-xs text-slate-300">
                       {selectedNode.group === 'concept'
-                        ? "This concept was synthesized from your uploaded evidence."
+                        ? "This concept is part of the Global Knowledge Graph."
                         : "This is a raw data point from your seed inputs."}
                     </p>
 
@@ -370,9 +528,6 @@ export default function Home() {
                         >
                           Inspect Source
                         </button>
-                        <button className="text-xs bg-red-500/10 hover:bg-red-500/20 px-2 py-1 rounded text-red-300 transition-colors border border-red-500/10">
-                          Mark Contradiction
-                        </button>
                       </div>
                     </div>
                   </>
@@ -385,7 +540,7 @@ export default function Home() {
                     {selectedNode.citation && (
                       <p className="text-[10px] text-slate-400 mb-2">Source: {selectedNode.citation}</p>
                     )}
-                    {selectedNode.sourceText}
+                    {selectedNode.sourceText || "No raw text available."}
                   </div>
                 )}
               </div>
@@ -395,6 +550,7 @@ export default function Home() {
           {/* Session Summary Overlay (Crystallized State) */}
           {isCrystallized && (
             <div className="absolute inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center p-8 z-50">
+              {/* ... existing summary UI ... */}
               <div className="bg-slate-900 border border-purple-500/30 p-8 rounded-2xl max-w-2xl w-full text-center shadow-2xl relative">
                 <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-purple-600 rounded-full p-4 shadow-lg shadow-purple-500/20">
                   <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">

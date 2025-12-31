@@ -11,8 +11,9 @@ class Settings(BaseSettings):
     ARANGO_DB_NAME: str = "cognitive_loom"
     
     # LLM
+    #OPEN_ROUTER_API_KEY: str
+    GEMINI_API_KEY: str
     OPEN_ROUTER_API_KEY: str
-
 
     class Config:
         env_file = ".env"

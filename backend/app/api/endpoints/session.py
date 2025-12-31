@@ -69,3 +69,50 @@ async def update_session_content_endpoint(session_id: str, request: UpdateConten
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@router.get("/global/graph")
+async def get_global_graph_endpoint(limit: int = 50, offset: int = 0, session_id: str = None):
+    """
+    Returns the Global Knowledge Graph (Layer 1).
+    Default: Top 50 influential nodes.
+    If session_id is provided, prioritizes session context.
+    """
+    try:
+        data = await rag_service.get_global_graph(limit=limit, offset=offset, session_id=session_id)
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Crystallization Wizard Endpoints ---
+
+@router.post("/crystallize/{session_id}/preview")
+async def preview_crystallization(session_id: str):
+    """
+    Generates a Preview of the Crystallization process (Entity Resolution & Conflict Detection).
+    Does NOT write to the DB.
+    """
+    try:
+        # Use the dedicated preview method that returns data!
+        proposal = await rag_service.preview_crystallization(session_id)
+        return proposal
+    except Exception as e:
+        print(f"Preview Failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class CommitCrystallizationRequest(BaseModel):
+    approved_merges: list
+    new_nodes: list
+
+@router.post("/crystallize/{session_id}/commit")
+async def commit_crystallization_endpoint(session_id: str, request: CommitCrystallizationRequest):
+    """
+    Finalizes the crystallization. Writes Concepts and Edges to the Global Graph.
+    """
+    try:
+        result = await rag_service.commit_crystallization(
+            session_id, 
+            request.approved_merges, 
+            request.new_nodes
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

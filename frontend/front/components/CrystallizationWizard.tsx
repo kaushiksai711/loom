@@ -33,6 +33,7 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
     const [step, setStep] = useState<"preview" | "review" | "commit">("preview");
     const [proposal, setProposal] = useState<MergeProposal | null>(null);
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [approvedMerges, setApprovedMerges] = useState<Set<number>>(new Set());
     const [committing, setCommitting] = useState(false);
 
@@ -42,22 +43,34 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
 
     const fetchPreview = async () => {
         setLoading(true);
+        setError(null);
         try {
-            const res = await fetch(`http://localhost:8000/api/v1/session/crystallize/${sessionId}/preview`, {
+            const res = await fetch(`http://127.0.0.1:8000/api/v1/session/crystallize/${sessionId}/preview`, {
                 method: "POST"
             });
+
+            if (!res.ok) throw new Error(`Preview fetch failed: ${res.statusText}`);
+
             const data = await res.json();
+            if (!data) throw new Error("Received empty data from backend");
+
+            console.log("Crystallization Preview Data:", data); // Debug
+
             setProposal(data);
 
-            // Auto-approve auto_merges
-            const autoIndices = data.proposed_merges
+            // Safety: Ensure arrays exist
+            const merges = data.proposed_merges || [];
+            if (!Array.isArray(merges)) throw new Error("Invalid format: proposed_merges is not an array");
+
+            const autoIndices = merges
                 .map((m: any, i: number) => m.status === "auto_merge" ? i : -1)
                 .filter((i: number) => i !== -1);
             setApprovedMerges(new Set(autoIndices));
 
             setStep("review");
-        } catch (err) {
-            console.error(err);
+        } catch (err: any) {
+            console.error("Preview Error:", err);
+            setError(err.message || "Failed to load preview");
         } finally {
             setLoading(false);
         }
@@ -79,7 +92,7 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
                 new_nodes: proposal.new_nodes
             };
 
-            const res = await fetch(`http://localhost:8000/api/v1/session/crystallize/${sessionId}/commit`, {
+            const res = await fetch(`http://127.0.0.1:8000/api/v1/session/crystallize/${sessionId}/commit`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload)
@@ -107,7 +120,20 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
         );
     }
 
-    if (!proposal) return <div className="text-red-400">Failed to load proposal.</div>;
+    if (error) {
+        return (
+            <div className="flex flex-col items-center justify-center py-20 text-red-400">
+                <AlertTriangle className="w-12 h-12 mb-4" />
+                <p className="font-bold">Crystallization Protocol Failed</p>
+                <p className="text-sm mt-2">{error}</p>
+                <button onClick={fetchPreview} className="mt-6 px-4 py-2 bg-slate-800 rounded hover:bg-slate-700 text-white text-sm">
+                    Retry Analysis
+                </button>
+            </div>
+        );
+    }
+
+    if (!proposal) return <div className="text-red-400 p-10 text-center">No proposal data available.</div>;
 
     return (
         <div className="max-w-4xl mx-auto space-y-8 pb-20">

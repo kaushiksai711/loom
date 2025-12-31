@@ -27,32 +27,72 @@ async def chat_session(request: ChatRequest):
     Uses Hybrid RAG.
     """
     try:
-        # 1. Retrieve Context
-        # Real Hybrid RAG
-        # User requested "World Knowledge" access for Neuro Chat, so we pass session_id=None to search GLOBAL seeds.
-        context_result = await rag_service.hybrid_search(
+        import asyncio
+        import json
+
+        # 1. Retrieve Context (Parallel Execution)
+        # Task A: Session Context (High Priority, Strict)
+        # We want this to definitely finish, as it's the immediate conversation memory.
+        session_task = rag_service.hybrid_search(
             query=request.message, 
-            session_id=request.session_id, # ENABLE SESSION SCOPE
+            session_id=request.session_id, 
             intent=request.intent,
-            top_k=5
+            top_k=5,
+            allow_global_fallback=False # Strict Session Scope
         )
+
+        # Task B: Global Scout (Background Wisdom)
+        # Search everything (session_id=None) but with a strict timeout.
+        global_task = rag_service.hybrid_search(
+            query=request.message, 
+            session_id=None, 
+            intent=request.intent,
+            top_k=3
+        )
+
+        # Execute
+        context_result = await session_task
         
-        # Format context (Stringify the list of documents)
-        context_text = "\n".join([
-            f"Result (Score: {item['score']:.2f}):\n"
-            f"  Highlight: {item['doc'].get('highlight', item['doc'].get('label', 'Unknown'))}\n"
-            f"  Context: {item['doc'].get('context', 'No surrounding context available.')}\n"
-            for item in context_result if 'doc' in item
-        ])
+        try:
+            # "Global Scout" - 800ms Timeout
+            global_result = await asyncio.wait_for(global_task, timeout=0.8)
+            
+            # Merge & Dedup
+            seen_ids = {item['doc']['_id'] for item in context_result if 'doc' in item}
+            for item in global_result:
+                if 'doc' in item and item['doc'].get('_id') not in seen_ids:
+                    context_result.append(item)
+                    print(f"[Global Scout] Found relevant insight: {item['doc'].get('label', 'Unknown')}")
+                    
+        except asyncio.TimeoutError:
+            print("[Global Scout] Search timed out (latency protection active).")
+        except Exception as e:
+            print(f"[Global Scout] Failed: {e}")
         
-        if not context_text:
-            context_text = "No direct matches found in global knowledge."
+        # Format context (Structured JSON for LLM)
+        # Filter down to essential fields to save tokens
+        clean_context = []
+        for item in context_result:
+            if 'doc' not in item: continue
+            clean_context.append({
+                "label": item['doc'].get('label', item['doc'].get('highlight', '')[:50]),
+                "content": item['doc'].get('highlight') or item['doc'].get('text', ''),
+                "source": item['doc'].get('source', 'Unknown'),
+                "score": round(item['score'], 2),
+                "type": item.get('edge_type', 'similarity')
+            })
+
+        context_text = json.dumps(clean_context, indent=2)
+        
+        if not context_result:
+            context_text = "No direct matches found in knowledge base."
             
         print(f"\n[DEBUG] RAG Context ({len(context_result)} items):\n{context_text}\n")
         
         # 2. Conflict Detection (Neurosymbolic Safety Check)
         conflict_warnings = []
         try:
+            # Also async this if possible, but conflict check is usually fast vector search
             conflicts = await rag_service.detect_conflicts(request.message)
             if conflicts:
                 for c in conflicts:
