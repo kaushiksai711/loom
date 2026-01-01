@@ -70,6 +70,7 @@ class TokenBucket:
             await asyncio.sleep(wait_seconds)
 
 # Global Limiter Instance (Conservative for Free Tier)
-# 15 RPM = 0.25 requests/sec. 
-# Let's set slightly higher: 60 RPM = 1.0/sec burstable to 10.
-global_limiter = TokenBucket(capacity=5, refill_rate=0.5) 
+# Free Tier Limit: ~15 RPM (= 0.25 req/sec).
+# We set refill_rate to 0.2 (1 request every 5 seconds) to remains safe.
+# Capacity = 5 allows small bursts (e.g. parallel chunks).
+global_limiter = TokenBucket(capacity=5, refill_rate=0.2) 

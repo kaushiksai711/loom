@@ -8,6 +8,7 @@ from backend.app.services.llm import get_llm
 from backend.app.core.prompts import prompts
 from langchain_core.messages import HumanMessage, SystemMessage
 from backend.app.core.rate_limiter import global_limiter
+from fuzzywuzzy import fuzz
 class GraphRAGService:
     def __init__(self):
         # Initialize FastEmbed (Lightweight, High Quality, Local)
@@ -567,118 +568,181 @@ class GraphRAGService:
 
     async def consolidate_session(self, session_id: str):
         """
-        Phase 3: The Heavy Lift.
-        1. Conservative Entity Linking (No Auto-Merge): Find similar concepts, create RELATED_TO edges.
-        2. Structural Mastery: Update mastery based on InDegree + OutDegree.
-        3. Archive Session.
+        Phase 8: Hybrid Entity Resolution.
+        1. Find Concepts created in this session.
+        2. Compare against Global Graph (Vector + Fuzzy + LLM).
+        3. Merge or Link.
+        4. Archive Session.
         """
-        print(f"--- Starting Consolidation for Session: {session_id} ---")
+        print(f"--- Starting Hybrid Consolidation for Session: {session_id} ---")
         
-        # 1. Identify Touched Concepts (from UserSeeds)
-        # We assume UserSeeds are linked to Concepts or ARE the source of truth for this session.
-        # For this MVP, we iterate over UserSeeds created in this session.
+        # 1. Identify Concepts created in this session
+        # We find them via the edges created during extraction
+        session_node_id = f"Sessions/{session_id}"
         
-        # 1. Identify Touched Concepts (from Seeds)
-        # We assume Seeds (ingested clips) are the source of truth for this session.
-        
-        aql_seeds = """
-        FOR doc IN Seeds
-            FILTER doc.session_id == @session_id
-            RETURN doc
+        aql_concepts = """
+        FOR link IN ConceptSessionLinks
+            FILTER link._to == @session_node_id
+            RETURN DOCUMENT(link._from)
         """
-        cursor = self.db.aql.execute(aql_seeds, bind_vars={"session_id": session_id})
-        user_seeds = list(cursor)
+        cursor = self.db.aql.execute(aql_concepts, bind_vars={"session_node_id": session_node_id})
+        new_concepts = list(cursor)
         
-        if not user_seeds:
-            print("No User Seeds found to consolidate.")
-            return
+        if not new_concepts:
+            print("No new concepts to consolidate.")
+        else:
+            print(f"Processing {len(new_concepts)} new concepts for resolution...")
 
-        # 2. Conservative Entity Linking
-        # Check each seed against Global Graph Concepts (excluding this session's own creations if possible, but simplicity first)
-        for seed in user_seeds:
-            # Vector Search for similar existing concepts
-            embedding = seed.get('embedding')
-            if not embedding: continue
-            
-            # Find Candidates (High Similarity > 0.85)
-            aql_candidates = """
-            FOR doc IN Concepts
-                LET score = COSINE_SIMILARITY(doc.embedding, @embedding)
-                FILTER score > 0.85
-                RETURN { id: doc._id, label: doc.label, score: score }
-            """
-            candidates_cursor = self.db.aql.execute(aql_candidates, bind_vars={"embedding": embedding})
-            candidates = list(candidates_cursor)
-            
-            for cand in candidates:
-                # create RELATED_TO edge
-                # Check if edge exists first to avoid dupes
-                # (Skipped check for speed, Arango ignores duplicate _key if we set it deterministically, or we just insert)
-                preview_text = seed.get('highlight', seed.get('text', ''))
-                print(f"   -> Linking Seed '{preview_text[:20]}...' to Concept '{cand['label']}' (Score: {cand['score']:.2f})")
+            for concept in new_concepts:
+                if not concept: continue
+                # Safety Check: Ensure embedding exists
+                if 'embedding' not in concept or not concept['embedding']:
+                    print(f"   Skipping resolution for '{concept.get('label','?')}' (No Embedding)")
+                    continue
                 
-                edge = {
-                    "_from": seed['_id'],
-                    "_to": cand['id'],
-                    "type": "RELATED_TO",
-                    "status": "candidate_merge", # Flag for user review
-                    "weight": cand['score']
-                }
-                try:
-                    self.db.collection("Relationships").insert(edge)
-                except:
-                    pass # Ignore if exists
-
-        # 3. Structural Mastery Update (Pure Graph)
-        # Update mastery for ALL concepts connected to this session's seeds
-        print("   -> Updating Structural Mastery...")
-        
-        # AQL to find all related concepts and recalc degree
-        # 1. Fetch Touched Concepts
-        aql_fetch = """
-        LET touched_concepts = (
-            FOR seed IN Seeds
-                FILTER seed.session_id == @session_id
-                FOR v, e, p IN 1..1 ANY seed GRAPH 'concept_graph'
-                FILTER v != null
-                FILTER IS_SAME_COLLECTION('Concepts', v)
-                RETURN DISTINCT v._id
-        )
-        RETURN touched_concepts
-        """
-        cursor = self.db.aql.execute(aql_fetch, bind_vars={"session_id": session_id})
-        touched_ids = list(cursor)[0]
-        
-        print(f"   -> Found {len(touched_ids)} connected concepts to update.")
-        
-        # 2. Update Each Concept (Robust)
-        for cid in touched_ids:
-            if not cid: continue
-            
-            try:
-                aql_update = """
-                LET cid = @cid
-                LET in_degree = LENGTH(FOR doc IN Relationships FILTER doc._to == cid RETURN 1)
-                LET out_degree = LENGTH(FOR doc IN Relationships FILTER doc._from == cid RETURN 1)
-                LET raw_score = (in_degree + out_degree) * 0.05
-                LET new_mastery = MIN([1.0, raw_score])
-                
-                UPDATE cid WITH { mastery: new_mastery, last_reviewed: DATE_ISO8601(DATE_NOW()) } IN Concepts OPTIONS { ignoreErrors: true }
-                RETURN { id: cid, old: OLD.mastery, new: new_mastery }
+                # 2. Vector Search for Candidates (excluding self)
+                aql_candidates = """
+                FOR doc IN Concepts
+                    FILTER doc._id != @concept_id
+                    LET score = COSINE_SIMILARITY(doc.embedding, @embedding)
+                    FILTER score > 0.85
+                    SORT score DESC
+                    LIMIT 5
+                    RETURN { id: doc._id, label: doc.label, definition: doc.definition, score: score }
                 """
                 
-                upd_cursor = self.db.aql.execute(aql_update, bind_vars={"cid": cid})
-                for m in upd_cursor:
-                     print(f"      Concept {m['id']} Mastery: {m['old'] or 0} -> {m['new']}")
-                     
-            except Exception as e:
-                print(f"      [WARNING] Failed to update concept {cid}: {e}")
+                candidates_cursor = self.db.aql.execute(aql_candidates, bind_vars={
+                    "concept_id": concept['_id'],
+                    "embedding": concept['embedding']
+                })
+                candidates = list(candidates_cursor)
+                
+                merged = False
+                for cand in candidates:
+                    if merged: break
+                    
+                    # 3. Hybrid Judge Logic
+                    # Calculate Fuzzy Ratio
+                    label_a = concept.get('label', '').lower()
+                    label_b = cand['label'].lower()
+                    fuzzy_score = fuzz.ratio(label_a, label_b)
+                    
+                    is_match = False
+                    reason = "Hybrid Logic"
+                    
+                    print(f"   Checking: '{concept['label']}' vs '{cand['label']}' (Vector: {cand['score']:.2f}, Fuzzy: {fuzzy_score})")
 
-        # 4. Archiving
-        # For MVP, we just assume Session Collection exists or we conceptually mark it.
-        # Since we don't have a specific 'Sessions' collection setup in the previous steps explicitly verified, 
-        # we will skip the actual DB update for Session object if it doesn't exist, but logic is here.
-        print(f"--- Consolidation Complete. Session {session_id} Archived. ---")
+                    if cand['score'] > 0.98:
+                         # Case A: Aggressive Vector Auto-Merge
+                         is_match = True
+                         reason = f"High Vector Score ({cand['score']:.3f})"
+
+                    elif fuzzy_score > 90:
+                        # Case B: High Fuzzy -> Auto Merge
+                        is_match = True
+                        reason = f"High Fuzzy Score ({fuzzy_score})"
+                    
+                    elif cand['score'] > 0.85: 
+                        # Case C: Ambiguous Middle Ground (High Vector, Low Fuzzy) -> LLM Judge
+                        print("   -> Invoking LLM Judge (Ambiguous)...")
+                        is_match, reason = await self._llm_merge_judge(concept, cand)
+                    
+                    if is_match:
+                        print(f"   MATCH FOUND! Merging {concept['label']} -> {cand['label']} ({reason})")
+                        await self._merge_concepts(source_id=concept['_id'], target_id=cand['id'])
+                        merged = True
+                    else:
+                        # If not a match, but High Vector, make sure they are linked?
+                        # Using _form_synapses logic implicitly for new concepts later, 
+                        # but we can add a quick link here if score > 0.88?
+                        # Let's keep it simple for now to avoid noise.
+                        pass
+
+        # 4. Form Synapses (Auto-Association)
+        await self._form_synapses(new_concepts, session_id)
+
+        # 5. Crystalize
+        self.db.aql.execute("""
+            UPDATE @key WITH { status: 'crystallized', finalized_at: DATE_ISO8601(DATE_NOW()) } IN Sessions
+        """, bind_vars={"key": session_id})
+        
+        return {"status": "success", "message": "Session Crystallized with Hybrid Resolution"}
+
+    async def _llm_merge_judge(self, concept_a: Dict, concept_b: Dict) -> (bool, str):
+        """
+        Asks the LLM if two concepts are semantically identical.
+        """
+        llm = get_llm()
+        prompt = prompts.get("merge_judge", 
+            concept_a=concept_a.get('label'), def_a=concept_a.get('definition', ''),
+            concept_b=concept_b['label'], def_b=concept_b.get('definition', '')
+        )
+        
+        try:
+            await global_limiter.wait_for_token()
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            content = response.content.strip().replace("```json", "").replace("```", "")
+            data = json.loads(content)
+            return data.get("is_same", False), data.get("reason", "LLM Decision")
+        except Exception as e:
+            print(f"LLM Judge Error: {e}")
+            return False, "Error"
+
+    async def _merge_concepts(self, source_id: str, target_id: str):
+        """
+        Merges Source Node INTO Target Node.
+        1. Move all Edges (In/Out) from Source to Target.
+        2. Delete Source Node.
+        """
+        # AQL to move edges
+        # We need to handle 'from' edges and 'to' edges
+        
+        # 1. Move Outgoing Edges (Source -> X) ==> (Target -> X)
+        # Avoid duplicate edges if Target -> X already exists
+        aql_move_out = """
+        FOR e IN Relationships
+            FILTER e._from == @source_id
+            // Check if equivalent edge exists
+            LET exists = FIRST(
+                FOR te IN Relationships
+                    FILTER te._from == @target_id AND te._to == e._to AND te.type == e.type
+                    RETURN 1
+            )
+            FILTER exists == null
+            // Re-create edge
+            INSERT { _from: @target_id, _to: e._to, type: e.type, created_at: e.created_at, merged_from: @source_id } INTO Relationships
+        """
+        self.db.aql.execute(aql_move_out, bind_vars={"source_id": source_id, "target_id": target_id})
+        
+        # 2. Move Incoming Edges (X -> Source) ==> (X -> Target)
+        aql_move_in = """
+        FOR e IN Relationships
+            FILTER e._to == @source_id
+             // Check if equivalent edge exists
+            LET exists = FIRST(
+                FOR te IN Relationships
+                    FILTER te._to == @target_id AND te._from == e._from AND te.type == e.type
+                    RETURN 1
+            )
+            FILTER exists == null
+            INSERT { _from: e._from, _to: @target_id, type: e.type, created_at: e.created_at, merged_from: @source_id } INTO Relationships
+        """
+        self.db.aql.execute(aql_move_in, bind_vars={"source_id": source_id, "target_id": target_id})
+        
+        # 3. Delete Source Node and its old edges
+        # Delete edges explicitly or let Arango graph handle?
+        # AQL REMOVE on edges is safest.
+        self.db.aql.execute("FOR e IN Relationships FILTER e._from == @id OR e._to == @id REMOVE e IN Relationships", bind_vars={"id": source_id})
+        
+        # Also remove from ConceptSessionLinks
+        if self.db.has_collection("ConceptSessionLinks"):
+             self.db.aql.execute("FOR e IN ConceptSessionLinks FILTER e._from == @id OR e._to == @id REMOVE e IN ConceptSessionLinks", bind_vars={"id": source_id})
+             
+        # Delete Node
+        self.db.collection("Concepts").delete(source_id, ignore_missing=True)
+        print(f"   -> Merged {source_id} into {target_id}")
+
+
 
     async def get_session_summary(self, session_id: str) -> Dict:
         """

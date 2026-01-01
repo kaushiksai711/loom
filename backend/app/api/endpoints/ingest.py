@@ -57,13 +57,15 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
         if full_text_buffer:
             full_text = "\n".join(full_text_buffer)
             # Add to background tasks -> Returns immediately
-            print(f"--- Queuing Background Extraction for {file.filename} ---")
-            background_tasks.add_task(
-                rag_service.process_batch_extraction,
-                full_text=full_text,
-                source_name=file.filename,
-                session_id=session_id
-            )
+            # COST SAVING: User requested to Disable Auto-Extract.
+            # We now only store the Seed (Vector). Extraction happens explicitly later (via Crystallize).
+            print(f"--- stored raw content for {file.filename} (Skipping Auto-Extract) ---")
+            # background_tasks.add_task(
+            #     rag_service.process_batch_extraction,
+            #     full_text=full_text,
+            #     source_name=file.filename,
+            #     session_id=session_id
+            # )
         
         # Cleanup (Optional: Keep for debugging if needed, or remove later)
         # os.remove(file_path) 

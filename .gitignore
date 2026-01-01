@@ -38,3 +38,8 @@ verify_rate_limiter.py
 verify_node_details.py
 verify_session_mgmt.py
 verify_prompts_refactor.py
+check_db_version.py
+setup_indexes.py
+verification_log.txt
+verify_entity_resolution.py
+verify_view.py

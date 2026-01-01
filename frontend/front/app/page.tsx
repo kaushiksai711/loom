@@ -4,6 +4,7 @@
 // usually ForceGraph needs 'use client' which we have.
 // Actually, react-force-graph-2d often fails SSR, so let's keep dynamic import but handle it properly.
 import dynamic from 'next/dynamic';
+import { v4 as uuidv4 } from 'uuid';
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
@@ -20,7 +21,27 @@ const GraphVisualization = dynamic(() => import("@/components/GraphVisualization
 
 export default function Home() {
   const router = useRouter();
-  const [sessionID, setSessionID] = useState("session_alpha_1"); // Hardcoded for MVP
+  const [sessionID, setSessionID] = useState("");
+
+  // Initialize Session on Mount
+  useEffect(() => {
+    const stored = localStorage.getItem("loom_current_session");
+    if (stored) {
+      setSessionID(stored);
+    } else {
+      const newID = uuidv4();
+      setSessionID(newID);
+      localStorage.setItem("loom_current_session", newID);
+    }
+  }, []);
+
+  const handleNewSession = () => {
+    const newID = uuidv4();
+    setSessionID(newID);
+    localStorage.setItem("loom_current_session", newID);
+    // Reset local state if needed (e.g., clear graph)
+    window.location.reload(); // Simple reload to clear state for MVP
+  };
   const [isCrystallized, setIsCrystallized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -419,6 +440,16 @@ export default function Home() {
             onSessionChange={(id) => setSessionID(id)}
             onCreateSession={handleCreateSession}
           />
+          <button
+            onClick={handleNewSession}
+            className="px-3 py-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 text-xs font-medium text-indigo-300 border border-indigo-500/30 flex items-center gap-2 transition-colors"
+            title="Create a fresh session ID"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            New Session
+          </button>
           <button
             onClick={() => setShowUpload(true)}
             className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs font-medium text-white border border-white/10 flex items-center gap-2 transition-colors"

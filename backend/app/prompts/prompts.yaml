@@ -85,3 +85,16 @@ synapse_formation: |
   Identify valid, logical relationships. 
   Return a JSON array of objects: [ {{ "target": "Existing Label", "relation": "is_part_of" | "enables" | "contradicts" | "requires" | "related_to" }} ]
   Only return strong, factual connections. If none, return [].
+
+merge_judge: |
+  You are a Knowledge Graph Curator.
+
+  Concept A: "{concept_a}" (Definition: {def_a})
+  Concept B: "{concept_b}" (Definition: {def_b})
+
+  Task: Determine if these strictly refer to the SAME semantic concept.
+  - "Rust" (Language) vs "Rust" (Game) -> NO.
+  - "AI" vs "Artificial Intelligence" -> YES.
+  - "Machine Learning" vs "AI" -> NO (Parent/Child, not same).
+
+  Return strictly JSON: {{ "is_same": boolean, "reason": "string" }}
