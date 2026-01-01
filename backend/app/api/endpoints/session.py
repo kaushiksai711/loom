@@ -10,7 +10,30 @@ class EndSessionRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     title: str
+    title: str
     goal: str = "General Exploration"
+
+@router.get("/")
+async def list_sessions():
+    """
+    Returns a list of all available sessions.
+    """
+    try:
+        sessions = await rag_service.list_sessions()
+        return sessions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/{session_id}")
+async def delete_session(session_id: str):
+    """
+    Permanently deletes a session and its contents.
+    """
+    try:
+        success = await rag_service.delete_session(session_id)
+        return {"status": "success", "session_id": session_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/create")
 async def create_new_session(request: CreateSessionRequest):

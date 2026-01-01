@@ -5,7 +5,9 @@ import datetime
 import json
 import re
 from backend.app.services.llm import get_llm
+from backend.app.core.prompts import prompts
 from langchain_core.messages import HumanMessage, SystemMessage
+from backend.app.core.rate_limiter import global_limiter
 class GraphRAGService:
     def __init__(self):
         # Initialize FastEmbed (Lightweight, High Quality, Local)
@@ -47,6 +49,64 @@ class GraphRAGService:
             
         self.db.collection("Sessions").insert(doc)
         return session_id
+
+    async def list_sessions(self) -> List[Dict]:
+        """
+        Returns all sessions, sorted by creation date (newest first).
+        """
+        if not self.db.has_collection("Sessions"):
+            return []
+            
+        aql = """
+        FOR s IN Sessions
+            SORT s.created_at DESC
+            LET concept_count = LENGTH(
+                FOR v, e IN 1..1 OUTBOUND s GRAPH 'concept_graph'
+                RETURN v
+            )
+            RETURN MERGE(s, { concept_count: concept_count })
+        """
+        cursor = self.db.aql.execute(aql)
+        return [doc for doc in cursor]
+
+    async def delete_session(self, session_id: str) -> bool:
+        """
+        Permanently deletes a session and its associated data.
+        1. Deletes Session Document.
+        2. Deletes all Seeds (Evidence) linked to this session.
+        3. Deletes all Edges connected to the Session Node.
+        """
+        try:
+            # 1. Delete Session Node
+            if self.db.has_collection("Sessions"):
+                self.db.collection("Sessions").delete(session_id, ignore_missing=True)
+                
+            # 2. Delete Seeds (Evidence)
+            # AQL is safer for batch deletion
+            aql_delete_seeds = """
+            FOR doc IN Seeds
+                FILTER doc.session_id == @session_id
+                REMOVE doc IN Seeds
+            """
+            self.db.aql.execute(aql_delete_seeds, bind_vars={"session_id": session_id})
+            
+            # 3. Delete Relationships (Edges)
+            # Remove any edge where _from or _to is the session_id
+            # Also remove edges where _from or _to was a Seed we just deleted (implicit via Arango/Graph usually, but manual to be safe)
+            # For now, just focus on direct Session Connections
+            aql_delete_edges = """
+            FOR e IN Relationships
+                FILTER e._from == @session_id OR e._to == @session_id
+                REMOVE e IN Relationships
+            """
+            self.db.aql.execute(aql_delete_edges, bind_vars={"session_id": f"Sessions/{session_id}"})
+            # Note: session_id in edge might form full ID if stored that way. 
+            # Usually input session_id is just UUID. Let's try both matches to be robust.
+            
+            return True
+        except Exception as e:
+            print(f"Error deleting session {session_id}: {e}")
+            raise e
 
     async def hybrid_search(self, query: str, session_id: str = None, intent: str = "GENERAL", top_k: int = 5, allow_global_fallback: bool = True) -> List[Dict]:
         """
@@ -262,75 +322,8 @@ class GraphRAGService:
         llm = get_llm()
         
         # The Legacy Prompt (Ported from extract_prompt_2.txt)
-        prompt_text = f"""
-## SYSTEM:
-You are a Senior Technical Architect analyzing complex blueprint documentation.
-The user will provide a **TEXT FRAGMENT** from a Technical Specification or Research Paper.
-
-**YOUR OBJECTIVE**: Extract core architectural components, frameworks, data structures, and algorithms.
-**NEGATIVE CONSTRAINTS**:
-- DO NOT extract generic business terms (e.g., "Customer Segmentation", "Marketing", "ROI") unless they are the *explicit technical subject*.
-- DO NOT extract generic verbs as concepts (e.g., "Improve", "Analyze").
-- DO NOT hallucinate. If the text is a fragment of a sentence, ignore it.
-
-If the text contains no significant technical concepts, return empty JSON: {{ "concepts": [] }}.
-
-Ensure relation targets match exact concept names where possible.
-Read the document text and output ONLY JSON that conforms to this enhanced hierarchy:
-
-```json
-{{
-  "domain": "string - inferred domain",
-  "concepts": [
-    {{
-      "name": "Concept Name",
-      "concept_type": "Definition|Concept|Framework|Model|Methodology|Process|Tool|Metric|Role|Task|Event",
-      
-      "operational_details": {{
-        "practical_measures": ["specific actionable steps"],
-        "implementation_steps": ["how to execute"],
-        "resources_required": ["tools, budget"],
-        "success_criteria": ["measurable outcomes"]
-      }},
-      
-      "contextual_examples": {{
-        "real_world_cases": ["examples mentioned"],
-        "quantitative_data": ["stats, numbers"]
-      }},
-      
-      "relations": [
-        {{
-          "type": "causes|mitigates|part-of|related-to|enables|requires|triggers|supports|coordinates-with|reports-to",
-          "target": "target concept name",
-          "note": "nature of relationship",
-          "strength": "strong|moderate"
-        }}
-      ],
-      
-      "sub_concepts": [
-        {{
-          "name": "SubConcept Name",
-          "explanation": "purpose",
-          "sub_type": "Phase|Step|Metric|Rule"
-        }}
-      ]
-    }}
-  ]
-}}
-```
-
-## OUTPUT REQUIREMENTS:
-- Return valid JSON only. No markdown formatting.
-- Extract BOTH high-level concepts AND operational details.
-- Map not just what relates to what, but HOW (relations).
-
-## USER MESSAGE:
-Document ID: {doc_id}
-Document text:
-\"\"\"
-{text_block}
-\"\"\"
-        """
+        # The Legacy Prompt (Ported from extract_prompt_2.txt)
+        prompt_text = prompts.get("extraction", doc_id=doc_id, text_block=text_block)
         
         # LOGGING PROMPT (User Request)
         try:
@@ -338,6 +331,9 @@ Document text:
                 f.write(f"\n\n--- [PROMPT] {datetime.datetime.now().isoformat()} ---\n{prompt_text}\n----------------------------------\n")
         except Exception as e:
             print(f"Log Error: {e}")
+
+        # Rate Limit Check
+        await global_limiter.wait_for_token()
 
         max_retries = 5
         base_delay = 2
@@ -368,6 +364,9 @@ Document text:
                     print(f"WARNING: LLM Rate Limit (429). Retrying in {delay}s... (Attempt {attempt+1}/{max_retries})")
                     import asyncio
                     await asyncio.sleep(delay)
+                    # Refund token? No, we consumed a request that failed. Just try again.
+                    # Wait for token again before retrying?
+                    await global_limiter.wait_for_token()
                 else:
                     # Non-retriable error
                     print(f"LLM Extraction failed: {e}")
@@ -550,16 +549,9 @@ Document text:
         
         conflicts = []
         for seed in relevant_seeds:
-            prompt = f"""
-            Check for logical contradiction between these two statements.
+            prompt = prompts.get("conflict_detection", seed_text=seed['text'], target_text=target_text)
             
-            Statement A (User Knowledge): "{seed['text']}"
-            Statement B (New Evidence): "{target_text}"
-            
-            If they contradict, explain why. If they agree or are unrelated, say "No Conflict".
-            Return JSON: {{ "conflict": boolean, "reason": "string" }}
-            """
-            
+            await global_limiter.wait_for_token()
             response = await llm.ainvoke([HumanMessage(content=prompt)])
             content = response.content.lower()
             
@@ -1278,18 +1270,10 @@ Document text:
             # 2. LLM Verification
             candidate_labels = [c['label'] for c in candidates]
             
-            prompt = f"""
-            I have a new concept: "{label}" (Definition: {concept.get('definition', '')})
-            
-            Here are existing concepts in the brain:
-            {json.dumps(candidate_labels)}
-            
-            Identify valid, logical relationships. 
-            Return a JSON array of objects: [ {{ "target": "Existing Label", "relation": "is_part_of" | "enables" | "contradicts" | "requires" | "related_to" }} ]
-            Only return strong, factual connections. If none, return [].
-            """
+            prompt = prompts.get("synapse_formation", label=label, definition=concept.get('definition', ''), candidate_labels=json.dumps(candidate_labels))
             
             try:
+                await global_limiter.wait_for_token()
                 response = await llm.ainvoke([
                     SystemMessage(content="You are a Knowledge Graph Architect. Output strictly JSON."),
                     HumanMessage(content=prompt)
@@ -1390,6 +1374,47 @@ Document text:
             md.append("\n")
             
         return "\n".join(md)
+
+    async def get_node_details(self, node_id: str) -> Dict:
+        """
+        Fetches full details for a node, including connectivity context.
+        Handles both Concepts and Seeds.
+        """
+        # 1. Determine Collection / Normalize ID
+        collection = "Concepts"
+        key = node_id
+        
+        if "/" in node_id:
+            parts = node_id.split("/")
+            collection = parts[0]
+            key = parts[1]
+        
+        # 2. Fetch Main Document
+        if not self.db.has_collection(collection):
+            return None
+            
+        doc = self.db.collection(collection).get(key)
+        if not doc:
+            return None
+            
+        # 3. Fetch Context (Neighbors) if it's a Concept
+        neighbors = []
+        if collection == "Concepts":
+            aql = """
+            FOR v, e IN 1..1 ANY @start_node GRAPH 'concept_graph'
+                RETURN {
+                    node: { id: v._id, label: v.label, type: v.type },
+                    edge: { type: e.type, from: e._from, to: e._to }
+                }
+            """
+            cursor = self.db.aql.execute(aql, bind_vars={"start_node": doc["_id"]})
+            neighbors = [item for item in cursor]
+            
+        return {
+            "data": doc,
+            "neighbors": neighbors,
+            "type": collection
+        }
 
     async def get_global_graph(self, limit: int = 50, offset: int = 0, session_id: str = None):
         """

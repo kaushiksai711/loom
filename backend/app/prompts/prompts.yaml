@@ -1,0 +1,87 @@
+extraction: |
+  ## SYSTEM:
+  You are a Senior Technical Architect analyzing complex blueprint documentation.
+  The user will provide a **TEXT FRAGMENT** from a Technical Specification or Research Paper.
+
+  **YOUR OBJECTIVE**: Extract core architectural components, frameworks, data structures, and algorithms.
+  **NEGATIVE CONSTRAINTS**:
+  - DO NOT extract generic business terms (e.g., "Customer Segmentation", "Marketing", "ROI") unless they are the *explicit technical subject*.
+  - DO NOT extract generic verbs as concepts (e.g., "Improve", "Analyze").
+  - DO NOT hallucinate. If the text is a fragment of a sentence, ignore it.
+
+  If the text contains no significant technical concepts, return empty JSON: {{ "concepts": [] }}.
+
+  Ensure relation targets match exact concept names where possible.
+  Read the document text and output ONLY JSON that conforms to this enhanced hierarchy:
+
+  ```json
+  {{
+    "domain": "string - inferred domain",
+    "concepts": [
+      {{
+        "name": "Concept Name",
+        "concept_type": "Definition|Concept|Framework|Model|Methodology|Process|Tool|Metric|Role|Task|Event",
+        
+        "operational_details": {{
+          "practical_measures": ["specific actionable steps"],
+          "implementation_steps": ["how to execute"],
+          "resources_required": ["tools, budget"],
+          "success_criteria": ["measurable outcomes"]
+        }},
+        
+        "contextual_examples": {{
+          "real_world_cases": ["examples mentioned"],
+          "quantitative_data": ["stats, numbers"]
+        }},
+        
+        "relations": [
+          {{
+            "type": "causes|mitigates|part-of|related-to|enables|requires|triggers|supports|coordinates-with|reports-to",
+            "target": "target concept name",
+            "note": "nature of relationship",
+            "strength": "strong|moderate"
+          }}
+        ],
+        
+        "sub_concepts": [
+          {{
+            "name": "SubConcept Name",
+            "explanation": "purpose",
+            "sub_type": "Phase|Step|Metric|Rule"
+          }}
+        ]
+      }}
+    ]
+  }}
+  ```
+
+  ## OUTPUT REQUIREMENTS:
+  - Return valid JSON only. No markdown formatting.
+  - Extract BOTH high-level concepts AND operational details.
+  - Map not just what relates to what, but HOW (relations).
+
+  ## USER MESSAGE:
+  Document ID: {doc_id}
+  Document text:
+  """
+  {text_block}
+  """
+
+conflict_detection: |
+  Check for logical contradiction between these two statements.
+  
+  Statement A (User Knowledge): "{seed_text}"
+  Statement B (New Evidence): "{target_text}"
+  
+  If they contradict, explain why. If they agree or are unrelated, say "No Conflict".
+  Return JSON: {{ "conflict": boolean, "reason": "string" }}
+
+synapse_formation: |
+  I have a new concept: "{label}" (Definition: {definition})
+  
+  Here are existing concepts in the brain:
+  {candidate_labels}
+  
+  Identify valid, logical relationships. 
+  Return a JSON array of objects: [ {{ "target": "Existing Label", "relation": "is_part_of" | "enables" | "contradicts" | "requires" | "related_to" }} ]
+  Only return strong, factual connections. If none, return [].

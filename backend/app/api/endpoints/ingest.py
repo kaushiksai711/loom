@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, BackgroundTasks
 from backend.app.services.ingestion import IngestionService
 import shutil
 import os
@@ -10,7 +10,7 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...), session_id: str = Form(None)):
+async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...), session_id: str = Form(None)):
     """
     Uploads a file, ingests it, and prepares it for the graph.
     If session_id is provided, links evidence to that session.
@@ -31,7 +31,6 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form(None)
         from backend.app.services.graph_rag import GraphRAGService
         rag_service = GraphRAGService()
         
-        ingested_count = 0
         ingested_count = 0
         full_text_buffer = []
 
@@ -54,22 +53,25 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form(None)
             )
             ingested_count += 1
         
-        # 3. Trigger Batch Extraction (One-Shot or Sliding Window)
+        # 3. Trigger Batch Extraction (Async Background)
         if full_text_buffer:
             full_text = "\n".join(full_text_buffer)
-            # This handles slicing into 20k batches internally
-            await rag_service.process_batch_extraction(
-                full_text=full_text, 
+            # Add to background tasks -> Returns immediately
+            print(f"--- Queuing Background Extraction for {file.filename} ---")
+            background_tasks.add_task(
+                rag_service.process_batch_extraction,
+                full_text=full_text,
                 source_name=file.filename,
                 session_id=session_id
             )
         
-        # Cleanup
-        # os.remove(file_path) # Keep for debugging for now
+        # Cleanup (Optional: Keep for debugging if needed, or remove later)
+        # os.remove(file_path) 
         
         return {
             "status": "success", 
-            "chunks_count": ingested_count, 
+            "chunks_count": ingested_count,
+            "message": "File uploaded. Extraction processing in background.",
             "preview": documents[0].page_content[:200] if documents else "No content"
         }
         

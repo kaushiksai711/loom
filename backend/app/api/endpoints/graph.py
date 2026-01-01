@@ -75,3 +75,20 @@ async def get_graph_data():
     ]
 
     return {"nodes": nodes, "links": links}
+
+@router.get("/node")
+async def get_node_details_endpoint(id: str):
+    """
+    Fetches rich details for a specific node ID (Concept or Source).
+    ID should be the full ArangoID (e.g., 'Concepts/Cognitive_Loom').
+    """
+    from backend.app.services.graph_rag import GraphRAGService
+    service = GraphRAGService()
+    
+    try:
+        details = await service.get_node_details(id)
+        if not details:
+            raise HTTPException(status_code=404, detail="Node not found")
+        return details
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

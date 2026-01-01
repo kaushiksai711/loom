@@ -32,3 +32,9 @@ log.txt
 read_text_only.py
 repair_brain.py
 verify_ingestion_deep.py
+feature_audit.md.resolved
+verify_async_ingest.py
+verify_rate_limiter.py
+verify_node_details.py
+verify_session_mgmt.py
+verify_prompts_refactor.py

@@ -9,6 +9,7 @@ import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import ChatInterface, { ChatIntent } from "@/components/ChatInterface";
 import RightSidebar from "@/components/RightSidebar";
+import SessionManager from "@/components/SessionManager";
 import { AvatarState } from "@/components/AvatarSlime";
 
 // Dynamically import GraphVisualization to avoid SSR issues with Canvas
@@ -207,14 +208,20 @@ export default function Home() {
 
   // Initial Data Fetch: Global Brain & History
   useEffect(() => {
+    // Reload Graph on Session Change
     fetchGlobalGraph('layer1');
+
+    // Reset UI State for new session
+    setMessages([]);
+    setAlerts([]);
+    setAvatarState('IDLE');
 
     // Fetch History for Stats
     fetch("http://127.0.0.1:8000/api/v1/ingest/history")
       .then(res => res.json())
       .then(data => setEvidenceHistory(data))
       .catch(err => console.error("Failed to load history:", err));
-  }, []);
+  }, [sessionID]); // Trigger on Session Switch
 
   const fetchGlobalGraph = async (layer: 'layer1' | 'layer2') => {
     setIsGraphLoading(true);
@@ -330,10 +337,30 @@ export default function Home() {
 
   const stopDrag = () => setIsDragging(false);
 
-  const handleNodeClick = (node: any) => {
+  const handleNodeClick = async (node: any) => {
     console.log("Node Clicked:", node);
+    // 1. Optimistic Set (Show what we have)
     setSelectedNode(node);
-    setShowSource(false); // Reset view
+    setShowSource(false);
+
+    // 2. Hydrate with Full Details from DB
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/api/v1/graph/node?id=${encodeURIComponent(node.id)}`);
+      if (res.ok) {
+        const details = await res.json();
+        console.log("Details fetched:", details);
+
+        // Merge DB data into visualization node
+        setSelectedNode((prev: any) => ({
+          ...prev, // Keep x,y, val, color
+          ...details.data, // Overwrite info with DB truth (label, definition, etc)
+          neighbors: details.neighbors, // Add neighbor context
+          fetchedAt: new Date()
+        }));
+      }
+    } catch (e) {
+      console.error("Failed to hydrate node:", e);
+    }
   };
 
   return (
@@ -387,15 +414,11 @@ export default function Home() {
             {brainLayer === 'layer1' ? "Show Full Brain" : "Show Top 50"}
           </button>
 
-          <button
-            onClick={handleCreateSession}
-            className="px-3 py-1.5 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 text-xs font-medium text-teal-300 border border-teal-500/20 flex items-center gap-2 transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            New Session
-          </button>
+          <SessionManager
+            currentSessionId={sessionID}
+            onSessionChange={(id) => setSessionID(id)}
+            onCreateSession={handleCreateSession}
+          />
           <button
             onClick={() => setShowUpload(true)}
             className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs font-medium text-white border border-white/10 flex items-center gap-2 transition-colors"
