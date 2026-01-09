@@ -21,11 +21,16 @@ export default function GraphPage() {
     const [isGraphLoading, setIsGraphLoading] = useState(false);
     const [selectedNode, setSelectedNode] = useState<any>(null);
     const [showSource, setShowSource] = useState(false);
+    const [searchTerm, setSearchTerm] = useState("");
+    const [isCrystallized, setIsCrystallized] = useState(false);
+    const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
 
     // Initial Data Fetch
     useEffect(() => {
         fetchGlobalGraph('layer1');
     }, []);
+
+
 
     const fetchGlobalGraph = async (layer: 'layer1' | 'layer2') => {
         setIsGraphLoading(true);
@@ -40,12 +45,20 @@ export default function GraphPage() {
             const nodes = data.nodes.map((n: any) => ({
                 id: n._id, // Use ArangoID as unique ID
                 label: n.label || n._id.split('/')[1],
-                // Updated Group Mapping: Source | Session | Concept
-                group: n.type === 'source' ? 'source' : (n.type === 'session_node' ? 'session' : 'concept'),
+                // Updated Group Mapping: Source | Session | Concept | Seed
+                // Map based on Arango Collection or Type
+                group: n.type === 'source' ? 'source' :
+                    (n.type === 'session_node' ? 'session' :
+                        (n.type === 'user_seed' ? 'thought' :
+                            (n.type === 'seed' ? 'evidence' : 'concept'))),
+
                 val: n.type === 'session_node' ? 20 : (n.val || 5), // Boost Session Nodes
                 status: n.status || 'neutral',
                 citation: `Global Influence: ${n.val ?? 'N/A'}`,
-                sourceText: n.definition || n.text || n.description || n.highlight || "Content not available in graph node."
+                sourceText: n.definition || n.text || n.description || n.highlight || "Content not available in graph node.",
+                // KEY FIX: Store PCA coordinates as *data*, not *state* (fx/fy locks the node)
+                pcaX: n.fx,
+                pcaY: n.fy
             }));
 
             const links = data.links.map((e: any) => ({
@@ -77,33 +90,88 @@ export default function GraphPage() {
     return (
         <div className="h-[calc(100vh-2rem)] flex flex-col gap-4">
             {/* Header */}
-            <div className="flex justify-between items-center px-4 shrink-0">
-                <div>
-                    <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-teal-400 to-purple-500">
-                        Knowledge Graph
-                    </h1>
-                    <p className="text-xs text-slate-500">
-                        Global Brain Visualization
-                    </p>
+            <div className="flex justify-between items-center px-4 shrink-0 z-50 relative">
+                <div className="flex items-center gap-4">
+                    <div>
+                        <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-teal-400 to-purple-500">
+                            Knowledge Graph
+                        </h1>
+                        <p className="text-xs text-slate-500">
+                            Global Brain Visualization
+                        </p>
+                    </div>
+
+                    {/* Search Bar */}
+                    <div className="relative">
+                        <input
+                            type="text"
+                            placeholder="Search concepts..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="bg-black/20 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-teal-500/50 w-64 transition-all"
+                        />
+                        {searchTerm && (
+                            <button onClick={() => setSearchTerm("")} className="absolute right-2 top-1.5 text-xs text-slate-500 hover:text-white">Esc</button>
+                        )}
+
+                        {/* Autocomplete Dropdown */}
+                        {searchTerm && (
+                            <div className="absolute top-full left-0 w-full mt-2 bg-[#0A0A15] border border-white/10 rounded-lg shadow-xl overflow-hidden z-50 max-h-60 overflow-y-auto custom-scrollbar">
+                                {graphData.nodes
+                                    .filter(n => (n.label || n.id).toLowerCase().includes(searchTerm.toLowerCase()))
+                                    .slice(0, 10)
+                                    .map((node) => (
+                                        <button
+                                            key={node.id}
+                                            onClick={() => {
+                                                setSearchTerm(node.label || node.id);
+                                                handleNodeClick(node);
+                                                setFocusedNodeId(node.id);
+                                            }}
+                                            className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-teal-500/20 hover:text-teal-200 border-b border-white/5 last:border-0 flex items-center justify-between group/item"
+                                        >
+                                            <span className="truncate">{node.label || node.id}</span>
+                                            <span className="text-[10px] opacity-0 group-hover/item:opacity-50 uppercase tracking-wider">{node.group}</span>
+                                        </button>
+                                    ))}
+                                {graphData.nodes.filter(n => (n.label || n.id).toLowerCase().includes(searchTerm.toLowerCase())).length === 0 && (
+                                    <div className="px-3 py-2 text-xs text-slate-600 italic">No matches found</div>
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
 
-                {/* Layer Toggle */}
-                <button
-                    onClick={toggleBrainLayer}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border flex items-center gap-2 transition-colors ${brainLayer === 'layer2'
-                        ? 'bg-purple-500/20 text-purple-300 border-purple-500/30'
-                        : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'
-                        }`}
-                >
-                    {isGraphLoading ? (
-                        <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                    ) : (
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                        </svg>
-                    )}
-                    {brainLayer === 'layer1' ? "Show Full Brain" : "Show Top 50"}
-                </button>
+                <div className="flex items-center gap-2">
+                    {/* Physics Toggle */}
+                    <button
+                        onClick={() => setIsCrystallized(!isCrystallized)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border flex items-center gap-2 transition-colors ${isCrystallized
+                            ? 'bg-blue-500/20 text-blue-300 border-blue-500/30'
+                            : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'
+                            }`}
+                    >
+                        {isCrystallized ? "💎 Crystal Mode" : "🦠 Slime Mode"}
+                    </button>
+
+                    {/* Layer Toggle */}
+                    <button
+                        onClick={toggleBrainLayer}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border flex items-center gap-2 transition-colors ${brainLayer === 'layer2'
+                            ? 'bg-purple-500/20 text-purple-300 border-purple-500/30'
+                            : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'
+                            }`}
+                    >
+                        {isGraphLoading ? (
+                            <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        ) : (
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                            </svg>
+                        )}
+                        {brainLayer === 'layer1' ? "Show Full Brain" : "Show Top 50"}
+                    </button>
+                </div>
             </div>
 
 
@@ -114,8 +182,10 @@ export default function GraphPage() {
                     // GraphVisualization might expect isCrystallized prop? Checking Page.tsx usage: 
                     // isCrystallized={isCrystallized}
                     // We can default it to false as this is the Global Explorer.
-                    isCrystallized={false}
+                    isCrystallized={isCrystallized}
+                    searchTerm={searchTerm}
                     onNodeClick={handleNodeClick}
+                    focusedNodeId={focusedNodeId}
                 />
 
                 {/* System Info Overlay */}

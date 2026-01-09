@@ -1527,4 +1527,22 @@ class GraphRAGService:
         
         cursor = self.db.aql.execute(aql, bind_vars={"limit": limit, "offset": offset, "session_id": session_id})
         result = list(cursor)
-        return result[0] if result else {"nodes": [], "links": []}
+        
+        data = result[0] if result else {"nodes": [], "links": []}
+        
+        # 5. Compute Layout (Logic Crystal)
+        try:
+            from backend.app.services.layout_algorithms import compute_pca_layout
+            # Only compute if we have nodes
+            if data['nodes']:
+                 layout = compute_pca_layout(data['nodes'])
+                 # Enrich nodes with fixed coordinates
+                 for node in data['nodes']:
+                     node_id = node.get('_id')
+                     if node_id in layout:
+                         node['fx'] = layout[node_id]['fx']
+                         node['fy'] = layout[node_id]['fy']
+        except Exception as e:
+            print(f"Layout Computation Failed: {e}")
+            
+        return data
