@@ -21,7 +21,8 @@ async def initiate_harvest(harvest_in: HarvestRequest):
                 "session_id": harvest_in.session_id,
                 "context": harvest_in.context,
                 "type": "highlight"
-            }
+            },
+            extract_concepts=False
         )
         # 2. Skip Workflow for now (Capture Only mode)
         # result = await harvest_app.ainvoke(inputs)

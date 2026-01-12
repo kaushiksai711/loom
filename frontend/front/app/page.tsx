@@ -441,7 +441,7 @@ export default function Home() {
             onCreateSession={handleCreateSession}
           />
           <button
-            onClick={handleNewSession}
+            onClick={handleCreateSession}
             className="px-3 py-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 text-xs font-medium text-indigo-300 border border-indigo-500/30 flex items-center gap-2 transition-colors"
             title="Create a fresh session ID"
           >

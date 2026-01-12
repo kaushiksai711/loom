@@ -101,7 +101,13 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
         }
     };
 
-    if (loading) return <div className="p-8 text-active">Loading Session Report...</div>;
+    if (loading) return (
+        <div className="flex flex-col items-center justify-center p-20 text-slate-400 space-y-4">
+            <div className="w-8 h-8 border-2 border-teal-500 border-t-transparent rounded-full animate-spin"></div>
+            <p>Weaving Knowledge Graph...</p>
+            <p className="text-xs text-slate-600">This may take a minute for large sessions.</p>
+        </div>
+    );
     if (!summary) return <div className="p-8 text-red-400">Session not found.</div>;
 
     return (

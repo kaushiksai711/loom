@@ -223,7 +223,7 @@ class GraphRAGService:
         doc = cursor.next()
         return doc["_id"]
 
-    async def ingest_document(self, content: str, metadata: Dict, extract_concepts: bool = True):
+    async def ingest_document(self, content: str, metadata: Dict, extract_concepts: bool = False):
         """
         Embeds and stores a document (Seed) in ArangoDB.
         Links it to the Source Node (Anchor).
@@ -756,12 +756,12 @@ class GraphRAGService:
         """
         session_cursor = self.db.aql.execute(aql_session, bind_vars={"session_id": session_id})
         session_docs = list(session_cursor)
-        if not session_docs:
-            return None
         
-        session = session_docs[0]
+        session = None
+        if session_docs:
+            session = session_docs[0]
         
-        # 2. Fetch Seeds (Evidence)
+        # 2. Fetch Seeds (Evidence) - Do this EARLY to check for orphans
         aql_seeds = """
         FOR doc IN Seeds
             FILTER doc.session_id == @session_id OR doc.session_id == @session_key
@@ -770,6 +770,26 @@ class GraphRAGService:
         """
         seeds_cursor = self.db.aql.execute(aql_seeds, bind_vars={"session_id": session_id, "session_key": session_id})
         seeds = list(seeds_cursor)
+        
+        # Checking for Orphaned Session (Evidence exists, but Session Node missing)
+        if not session:
+            if seeds:
+                print(f"WARNING: Session {session_id} Doc missing, but {len(seeds)} seeds found. Auto-healing...")
+                # Auto-Heal: Create Session Doc
+                import datetime
+                session = {
+                    "_key": session_id,
+                    "title": "Recovered Session",
+                    "goal": "Auto-healed from Evidence",
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "status": "active"
+                }
+                self.db.collection("Sessions").insert(session)
+            else:
+                # Truly Not Found
+                return None
+        
+        # 3. Fetch UserSeeds (Thoughts)
         
         # 3. Fetch UserSeeds (Thoughts)
         aql_user_seeds = """
@@ -845,56 +865,119 @@ class GraphRAGService:
         extracted_relationships = []
         
         if not existing_concepts and events:
-             # Lazy Load: Trigger Extraction
-             evidence_text = "\n\n".join([e['full_content'] for e in events if e['type'] == 'evidence'])
-             if evidence_text:
-                 print(f"DEBUG: Lazy Extracting Concepts for Session {session_id}...")
-                 # Now returns partial dict { concepts: [], relationships: [] }
-                 extraction_result = await self.extract_session_concepts(evidence_text)
+             try:
+                 # Lazy Load: Trigger Extraction
+                 evidence_texts = [e['full_content'] for e in events if e['type'] == 'evidence']
                  
-                 extracted_data = extraction_result.get("concepts", [])
-                 relationships_data = extraction_result.get("relationships", [])
-                 
-                 import datetime
-                 # 1. Save Concepts
-                 concept_map = {} # label -> _id
-                 for c in extracted_data:
-                     # Schema Matcher: Legacy Prompt uses 'name', Old uses 'label'
-                     label = c.get('name') or c.get('label', 'Unknown Concept')
+                 if evidence_texts:
+                     print(f"DEBUG: Lazy Extracting Concepts for Session {session_id}...")
                      
-                     # Definition Extraction
-                     definition = c.get('definition', "")
-                     if not definition and c.get('operational_details'):
-                         definition = c.get('operational_details', {}).get("implementation_steps", [""])[0]
+                     # BATCHING LOGIC
+                     full_evidence = "\n\n".join(evidence_texts)
+                     # Limit total processing to avoid timeout?
+                     # Let's verify length.
+                     print(f"DEBUG: Total Evidence Length: {len(full_evidence)}")
                      
-                     doc = {
-                         "text": c.get("text") or f"{label}: {definition}",
-                         "label": label,
-                         "definition": definition,
-                         "type": "extracted_concept",
-                         "session_id": session_id,
-                         "created_at": datetime.datetime.utcnow().isoformat(),
-                         "embedding": self.embed_query(label).tolist() 
-                     }
-                     meta = self.db.collection("UserSeeds").insert(doc)
-                     doc["_id"] = meta["_id"]
-                     extracted_concepts.append(doc)
-                     concept_map[label] = meta["_id"]
+                     BATCH_SIZE = 50000
+                     chunks = [full_evidence[i:i+BATCH_SIZE] for i in range(0, len(full_evidence), BATCH_SIZE)]
                      
-                 # 2. Save Relationships (as special seeds for now, or just edge logic)
-                 # We'll save them as UserSeeds type='extracted_relation' to persist them
-                 for r in relationships_data:
-                     if r['source'] in concept_map and r['target'] in concept_map:
-                         rel_doc = {
-                             "source_id": concept_map[r['source']],
-                             "target_id": concept_map[r['target']],
-                             "relation": r['relation'],
-                             "type": "extracted_relation",
+                     all_concepts = []
+                     all_relationships = []
+                     
+                     for i, chunk in enumerate(chunks):
+                         print(f"--- Processing Batch {i+1}/{len(chunks)} ---")
+                         try:
+                             result = await self.extract_session_concepts(chunk)
+                             if result:
+                                 batch_concepts = result.get("concepts", [])
+                                 batch_rels = result.get("relationships", []) 
+                                 
+                                 # Normalize nested relations
+                                 if not batch_rels:
+                                     for c in batch_concepts:
+                                         c_name = c.get('name') or c.get('label')
+                                         for r in c.get('relations', []):
+                                             batch_rels.append({
+                                                 "source": c_name,
+                                                 "target": r.get('target'),
+                                                 "relation": r.get('type')
+                                             })
+
+                                 all_concepts.extend(batch_concepts)
+                                 all_relationships.extend(batch_rels)
+                         except Exception as e:
+                             print(f"Error extracting batch {i}: {e}")
+                             import traceback
+                             traceback.print_exc()
+
+                     # Deduplicate Concepts
+                     unique_concepts = {}
+                     for c in all_concepts:
+                         name = c.get('name') or c.get('label')
+                         if name and name not in unique_concepts:
+                             unique_concepts[name] = c
+                             
+                     extracted_data = list(unique_concepts.values())
+                     
+                     # Deduplicate Relationships
+                     unique_rels = {}
+                     for r in all_relationships:
+                         key = (r.get('source'), r.get('target'), r.get('relation'))
+                         if key[0] and key[1] and key not in unique_rels:
+                             unique_rels[key] = r
+                             
+                     relationships_data = list(unique_rels.values())
+
+                     import datetime
+                     # 1. Save Concepts
+                     concept_map = {} 
+                     for c in extracted_data:
+                         label = c.get('name') or c.get('label', 'Unknown Concept')
+                         
+                         definition = c.get('definition', "")
+                         if not definition and c.get('operational_details'):
+                             definition = c.get('operational_details', {}).get("implementation_steps", [""])[0]
+                         
+                         # Embed might fail?
+                         emb = []
+                         try:
+                             emb = self.embed_query(label).tolist()
+                         except Exception as e:
+                             print(f"Embedding failed for {label}: {e}")
+
+                         doc = {
+                             "text": c.get("text") or f"{label}: {definition}",
+                             "label": label,
+                             "definition": definition,
+                             "type": "extracted_concept",
                              "session_id": session_id,
-                             "created_at": datetime.datetime.utcnow().isoformat()
+                             "created_at": datetime.datetime.utcnow().isoformat(),
+                             "embedding": emb
                          }
-                         self.db.collection("UserSeeds").insert(rel_doc)
-                         extracted_relationships.append(rel_doc)
+                         meta = self.db.collection("UserSeeds").insert(doc)
+                         doc["_id"] = meta["_id"]
+                         extracted_concepts.append(doc)
+                         concept_map[label] = meta["_id"]
+                         
+                     # 2. Save Relationships 
+                     for r in relationships_data:
+                         if r['source'] in concept_map and r['target'] in concept_map:
+                             rel_doc = {
+                                 "source_id": concept_map[r['source']],
+                                 "target_id": concept_map[r['target']],
+                                 "relation": r['relation'],
+                                 "type": "extracted_relation",
+                                 "session_id": session_id,
+                                 "created_at": datetime.datetime.utcnow().isoformat()
+                             }
+                             self.db.collection("UserSeeds").insert(rel_doc)
+                             extracted_relationships.append(rel_doc)
+             except Exception as e:
+                 print(f"CRITICAL ERROR in Defered Extraction: {e}")
+                 import traceback
+                 traceback.print_exc()
+                 # Do not re-raise to avoid 500. Return partial.
+                 pass
                          
         else:
             extracted_concepts = existing_concepts
@@ -1227,6 +1310,9 @@ class GraphRAGService:
         """
         import datetime
         
+        # Map for Migrating Edges: UserSeed ID -> Global Concept ID
+        seed_to_global_map = {}
+
         # 1. Process New Nodes -> Create Concepts
         created_concepts = []
         for node in new_nodes:
@@ -1251,6 +1337,9 @@ class GraphRAGService:
             meta = self.db.collection("Concepts").insert(concept_doc)
             created_concepts.append(meta)
             
+            # Update Map
+            seed_to_global_map[node['_id']] = meta['_id']
+            
             # LINK: Seed -> Crystallized As -> Concept
             self.db.collection("Relationships").insert({
                 "_from": node['_id'],
@@ -1263,6 +1352,9 @@ class GraphRAGService:
         for merge in approved_merges:
             source_id = merge['source_id'] # UserSeed
             target_id = merge['target_id'] # Existing Concept
+            
+            # Update Map (Merged seeds map to the EXISTING concept)
+            seed_to_global_map[source_id] = target_id
             
             # create SUPPORTS/CONTRIBUTES relationship
             edge = { 
@@ -1283,6 +1375,51 @@ class GraphRAGService:
                 LET doc = DOCUMENT(@target_id)
                 UPDATE doc WITH { mastery: MIN([1.0, (doc.mastery || 0) + 0.05]) } IN Concepts
             """, bind_vars={"target_id": target_id})
+            
+        # 2.5 Migrate Internal Session Relationships
+        # Now that we have the map, we act on the extracted_relation UserSeeds
+        print(f"Migrating Session Edges for {session_id}...")
+        aql_rels = """
+        FOR doc IN UserSeeds
+            FILTER doc.session_id == @session_id AND doc.type == 'extracted_relation'
+            RETURN doc
+        """
+        session_rels = list(self.db.aql.execute(aql_rels, bind_vars={"session_id": session_id}))
+        
+        migrated_count = 0
+        for rel in session_rels:
+            # Get Global IDs
+            # NOTE: session_rels use UserSeed IDs as strings in source_id/target_id fields? 
+            # Check schema: In get_session_summary, we stored them as:
+            # "source_id": concept_map[r['source']] -> which is a UserSeed ID
+            
+            src_seed_id = rel.get('source_id')
+            tgt_seed_id = rel.get('target_id')
+            
+            global_src = seed_to_global_map.get(src_seed_id)
+            global_tgt = seed_to_global_map.get(tgt_seed_id)
+            
+            if global_src and global_tgt:
+                # Prevent Self-Loops if merged to same concept
+                if global_src == global_tgt:
+                    continue
+                    
+                # Create Global Edge
+                relation_type = rel.get('relation', 'related_to').upper().replace(' ', '_')
+                
+                edge_doc = {
+                    "_from": global_src,
+                    "_to": global_tgt,
+                    "type": relation_type,
+                    "source": "session_crystallization",
+                    "original_rel_id": rel.get('_id'),
+                    "session_id": session_id,
+                    "created_at": datetime.datetime.utcnow().isoformat()
+                }
+                self.db.collection("Relationships").insert(edge_doc)
+                migrated_count += 1
+                
+        print(f"Migrated {migrated_count} internal edges to Global Graph.")
 
         # 3. Form Synapses (Auto-Association)
         await self._form_synapses(created_concepts, session_id)
@@ -1291,7 +1428,7 @@ class GraphRAGService:
             UPDATE @key WITH { status: 'crystallized', finalized_at: DATE_ISO8601(DATE_NOW()) } IN Sessions
         """, bind_vars={"key": session_id})
         
-        return {"status": "success", "message": "Session Crystallized with Synaptic Connections"}
+        return {"status": "success", "message": f"Session Crystallized. {migrated_count} internal edges preserved."}
 
     async def _form_synapses(self, new_concepts: List[Dict], session_id: str):
         """
@@ -1360,7 +1497,7 @@ class GraphRAGService:
                             "_to": target_match['id'],
                             "type": relation_type,
                             "source": "smart_synapse",
-                            "created_at": "now"
+                            "created_at": datetime.datetime.utcnow().isoformat()
                         }
                          # Safe Insert
                          try:
