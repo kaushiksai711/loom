@@ -3,7 +3,7 @@
 import { useEffect, useState, use } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
-import { Calendar, Clock, Edit2, Check, X, FileText, Brain, Share2, Layers, Download } from "lucide-react";
+import { Calendar, Clock, Edit2, Check, X, FileText, Brain, Share2, Layers, Download, Trash2 } from "lucide-react";
 import ThreeDMindmap from "@/components/ThreeDMindmap";
 import StructuredMindmap from "@/components/StructuredMindmap";
 import CrystallizationWizard from "@/components/CrystallizationWizard";
@@ -55,9 +55,11 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
 
     const [summary, setSummary] = useState<SessionSummary | null>(null);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<"summary" | "map" | "crystallize">("summary");
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState("");
+    const [editDescription, setEditDescription] = useState("");
     const [selectedNode, setSelectedNode] = useState<any>(null);
 
     useEffect(() => {
@@ -67,12 +69,13 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
 
     const fetchSummary = async () => {
         try {
-            const res = await fetch(`http://localhost:8000/api/v1/session/${id}/summary`);
-            if (!res.ok) throw new Error("Failed to fetch summary");
+            const res = await fetch(`http://127.0.0.1:8000/api/v1/session/${id}/summary`);
+            if (!res.ok) throw new Error("Failed to load session");
             const data = await res.json();
             setSummary(data);
-        } catch (err) {
+        } catch (err: any) {
             console.error(err);
+            setError(err.message);
         } finally {
             setLoading(false);
         }
@@ -86,18 +89,86 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
     const handleEditSave = async () => {
         if (!editingId || !id) return;
         try {
-            const res = await fetch(`http://localhost:8000/api/v1/session/${id}/content`, {
+            const res = await fetch(`http://127.0.0.1:8000/api/v1/session/${id}/content`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ item_id: editingId, content: editContent })
             });
-            if (!res.ok) throw new Error("Failed to update");
+            if (res.ok) {
+                await fetchSummary();
+                setEditingId(null);
+            } else {
+                alert("Failed to save changes");
+            }
+        } catch (err) {
+            console.error(err);
+            alert("Failed to save changes");
+        }
+    };
 
-            // Refresh
+    const handleNodeUpdate = async (nodeId: string) => {
+        if (!nodeId || !id) return;
+        try {
+            // Determine field based on group (thought vs concept)
+            // Default to definition for concepts, text for thoughts
+            const isThought = selectedNode?.group === 'thought';
+            const updates: any = { label: editContent };
+
+            if (isThought) {
+                updates.text = editDescription;
+            } else {
+                updates.definition = editDescription;
+            }
+
+            // Encode ID because ArangoDB IDs contain slashes (e.g., UserSeeds/123)
+            const encodedId = encodeURIComponent(nodeId);
+            const res = await fetch(`http://127.0.0.1:8000/api/v1/session/seed/${encodedId}?session_id=${id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ updates })
+            });
+
+            if (!res.ok) {
+                const errText = await res.text();
+                throw new Error(`Failed to update node: ${res.status} ${errText}`);
+            }
+
+            // Refresh & Close Edit Mode
+            // Refresh & Close Edit Mode
             await fetchSummary();
             setEditingId(null);
+            // Optimistic UI: Update both content and summary to ensure UI reflects changes immediately
+            // because the render logic prefers 'summary' if present.
+            setSelectedNode((prev: any) => ({
+                ...prev,
+                label: editContent,
+                content: editDescription,
+                summary: editDescription
+            }));
         } catch (err) {
-            alert("Failed to save changes");
+            console.error(err);
+            alert("Failed to update node");
+        }
+    };
+
+    const handleNodeDelete = async (nodeId: string) => {
+        if (!nodeId || !id) return;
+        if (!confirm("Are you sure you want to delete this concept? This will remove all its connections.")) return;
+
+        try {
+            const encodedId = encodeURIComponent(nodeId);
+            const res = await fetch(`http://127.0.0.1:8000/api/v1/session/seed/${encodedId}?session_id=${id}`, {
+                method: "DELETE"
+            });
+
+            if (!res.ok) throw new Error("Failed to delete node");
+
+            // Refresh & Close Modal
+            setSelectedNode(null);
+            await fetchSummary();
+        } catch (err) {
+            console.error(err);
+            alert("Failed to delete node (it might be too connected, try force delete via API if needed)");
         }
     };
 
@@ -289,42 +360,96 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
                         className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-                        onClick={() => setSelectedNode(null)}
+                        onClick={() => {
+                            setSelectedNode(null);
+                            setEditingId(null); // Reset edit state
+                        }}
                     >
                         <motion.div
-                            initial={{ scale: 0.95, y: 20 }}
-                            animate={{ scale: 1, y: 0 }}
-                            exit={{ scale: 0.95, y: 20 }}
-                            className="bg-slate-900 border border-slate-700 p-6 rounded-xl shadow-2xl max-w-lg w-full"
+                            initial={{ scale: 0.9, opacity: 0 }}
+                            animate={{ scale: 1, opacity: 1 }}
+                            exit={{ scale: 0.9, opacity: 0 }}
+                            className="bg-slate-900 border border-slate-700 p-8 rounded-2xl max-w-2xl w-full shadow-2xl relative"
                             onClick={e => e.stopPropagation()}
                         >
                             <div className="flex justify-between items-start mb-4">
-                                <h3 className="text-xl font-bold text-white">{selectedNode.label}</h3>
-                                <button onClick={() => setSelectedNode(null)} className="text-slate-400 hover:text-white">
-                                    <X className="w-5 h-5" />
-                                </button>
-                            </div>
-                            <div className="prose prose-invert prose-sm max-h-[60vh] overflow-y-auto custom-scrollbar">
-                                <p className="text-slate-300 whitespace-pre-wrap mb-4">{selectedNode.summary || selectedNode.content || "No details available."}</p>
-
-                                {selectedNode.references && selectedNode.references.length > 0 && (
-                                    <div className="mt-4 pt-4 border-t border-slate-700">
-                                        <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3">References</h4>
-                                        <div className="space-y-3">
-                                            {selectedNode.references.map((ref: any, idx: number) => (
-                                                <div key={idx} className="bg-slate-800/50 p-3 rounded-lg border border-slate-700/50">
-                                                    <div className="text-xs text-orange-400 font-bold mb-1">{ref.source}</div>
-                                                    <div className="text-xs text-slate-300 italic">"{ref.text}"</div>
-                                                </div>
-                                            ))}
-                                        </div>
+                                {editingId === selectedNode.id ? (
+                                    <div className="flex-1 flex gap-2">
+                                        <input
+                                            className="bg-black/50 border border-blue-500 rounded px-2 py-1 text-white text-xl font-bold w-full"
+                                            value={editContent}
+                                            onChange={(e) => setEditContent(e.target.value)}
+                                            autoFocus
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') handleNodeUpdate(selectedNode.id);
+                                            }}
+                                        />
+                                        <button onClick={() => handleNodeUpdate(selectedNode.id)} className="p-2 bg-blue-600 rounded">
+                                            <Check className="w-4 h-4" />
+                                        </button>
                                     </div>
+                                ) : (
+                                    <h3 className="text-xl font-bold text-white flex-1">{selectedNode.label}</h3>
                                 )}
+
+                                <div className="flex gap-2 ml-4">
+                                    {(!editingId || editingId === selectedNode.id) && (
+                                        <>
+                                            {!editingId && (
+                                                <button
+                                                    onClick={() => {
+                                                        setEditingId(selectedNode.id);
+                                                        setEditContent(selectedNode.label);
+                                                        setEditDescription(selectedNode.content || selectedNode.summary || "");
+                                                    }}
+                                                    className="text-slate-400 hover:text-blue-400 transition-colors"
+                                                    title="Edit Node"
+                                                >
+                                                    <Edit2 className="w-5 h-5" />
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => handleNodeDelete(selectedNode.id)}
+                                                className="text-slate-400 hover:text-red-400 transition-colors"
+                                                title="Delete Node"
+                                            >
+                                                <Trash2 className="w-5 h-5" />
+                                            </button>
+                                        </>
+                                    )}
+                                    <button onClick={() => {
+                                        setSelectedNode(null);
+                                        setEditingId(null);
+                                    }} className="text-slate-600 hover:text-white ml-2">
+                                        <X className="w-6 h-6" />
+                                    </button>
+                                </div>
                             </div>
+
+                            {editingId === selectedNode.id ? (
+                                <textarea
+                                    className="w-full h-64 bg-black/30 border border-slate-600 rounded p-4 text-slate-300 resize-none focus:border-blue-500 focus:outline-none"
+                                    value={editDescription}
+                                    onChange={(e) => setEditDescription(e.target.value)}
+                                    placeholder="Add a detailed description for this concept..."
+                                />
+                            ) : (
+                                <div className="prose prose-invert prose-sm max-h-[60vh] overflow-y-auto custom-scrollbar">
+                                    <p className="text-slate-300 whitespace-pre-wrap mb-4">{selectedNode.summary || selectedNode.content || "No details available."}</p>
+                                    {selectedNode.timeline_ref && (
+                                        <div className="mt-4 pt-4 border-t border-slate-700">
+                                            <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">Original Context</div>
+                                            <blockquote className="border-l-2 border-slate-600 pl-4 text-slate-400 italic">
+                                                "{selectedNode.timeline_ref}"
+                                            </blockquote>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </motion.div>
                     </motion.div>
                 )}
             </AnimatePresence>
-        </div>
+        </div >
     );
 }

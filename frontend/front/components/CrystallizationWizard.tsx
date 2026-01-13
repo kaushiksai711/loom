@@ -22,6 +22,14 @@ interface MergeProposal {
         conflicting_evidence: string;
         reason: string;
     }[];
+    proposed_synapses?: {
+        source_id: string;
+        source_label: string;
+        target_id: string;
+        target_label: string;
+        relation: string;
+        confidence: string;
+    }[];
 }
 
 interface CrystallizationWizardProps {
@@ -35,6 +43,7 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [approvedMerges, setApprovedMerges] = useState<Set<number>>(new Set());
+    const [approvedSynapses, setApprovedSynapses] = useState<Set<number>>(new Set());
     const [committing, setCommitting] = useState(false);
 
     useEffect(() => {
@@ -58,14 +67,19 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
 
             setProposal(data);
 
-            // Safety: Ensure arrays exist
+            // Auto-Approve Merges
             const merges = data.proposed_merges || [];
-            if (!Array.isArray(merges)) throw new Error("Invalid format: proposed_merges is not an array");
-
             const autoIndices = merges
                 .map((m: any, i: number) => m.status === "auto_merge" ? i : -1)
                 .filter((i: number) => i !== -1);
             setApprovedMerges(new Set(autoIndices));
+
+            // Auto-Approve High Confidence Synapses
+            const synapses = data.proposed_synapses || [];
+            const autoSynapseIndices = synapses
+                .map((s: any, i: number) => s.confidence === "high" ? i : -1)
+                .filter((i: number) => i !== -1);
+            setApprovedSynapses(new Set(autoSynapseIndices));
 
             setStep("review");
         } catch (err: any) {
@@ -83,13 +97,23 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
         setApprovedMerges(next);
     };
 
+    const toggleSynapse = (index: number) => {
+        const next = new Set(approvedSynapses);
+        if (next.has(index)) next.delete(index);
+        else next.add(index);
+        setApprovedSynapses(next);
+    };
+
     const handleCommit = async () => {
         if (!proposal) return;
         setCommitting(true);
         try {
+            const synapses = proposal.proposed_synapses || [];
+
             const payload = {
                 approved_merges: proposal.proposed_merges.filter((_, i) => approvedMerges.has(i)),
-                new_nodes: proposal.new_nodes
+                new_nodes: proposal.new_nodes,
+                approved_synapses: synapses.filter((_, i) => approvedSynapses.has(i))
             };
 
             const res = await fetch(`http://127.0.0.1:8000/api/v1/session/crystallize/${sessionId}/commit`, {
@@ -135,6 +159,8 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
 
     if (!proposal) return <div className="text-red-400 p-10 text-center">No proposal data available.</div>;
 
+    const synapses = (proposal as any).proposed_synapses || [];
+
     return (
         <div className="max-w-4xl mx-auto space-y-8 pb-20">
             {/* Header */}
@@ -144,7 +170,7 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
             </div>
 
             {/* Stats Grid */}
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-4 gap-4">
                 <div className="glass-card p-4 rounded-xl text-center border-l-4 border-blue-500">
                     <div className="text-2xl font-bold text-white mb-1">{proposal.new_nodes.length}</div>
                     <div className="text-xs text-slate-400 uppercase tracking-wider">New Concepts</div>
@@ -152,6 +178,10 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
                 <div className="glass-card p-4 rounded-xl text-center border-l-4 border-purple-500">
                     <div className="text-2xl font-bold text-white mb-1">{approvedMerges.size}</div>
                     <div className="text-xs text-slate-400 uppercase tracking-wider">Merges</div>
+                </div>
+                <div className="glass-card p-4 rounded-xl text-center border-l-4 border-teal-500">
+                    <div className="text-2xl font-bold text-white mb-1">{approvedSynapses.size}</div>
+                    <div className="text-xs text-slate-400 uppercase tracking-wider">Synapses</div>
                 </div>
                 <div className="glass-card p-4 rounded-xl text-center border-l-4 border-orange-500">
                     <div className="text-2xl font-bold text-white mb-1">{proposal.conflicts.length}</div>
@@ -215,6 +245,52 @@ export default function CrystallizationWizard({ sessionId, onComplete }: Crystal
                                         </div>
                                         <div className="text-xs text-slate-500 mt-1">
                                             Confidence: {(merge.confidence * 100).toFixed(1)}% • {merge.status === 'auto_merge' ? 'Auto-detected' : 'Ambiguous'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Synapses Section (Cross-Session Links) */}
+            <div>
+                <h3 className="flex items-center gap-2 text-lg font-semibold text-slate-200 mb-4">
+                    <Layers className="w-5 h-5 text-teal-400" />
+                    Cross-Session Links (Synapses)
+                </h3>
+                {synapses.length === 0 ? (
+                    <div className="text-slate-500 italic p-4 text-center glass-card rounded-xl">No cross-session connections discovered.</div>
+                ) : (
+                    <div className="space-y-3">
+                        {synapses.map((syn: any, i: number) => (
+                            <div
+                                key={i}
+                                onClick={() => toggleSynapse(i)}
+                                className={`
+                                    cursor-pointer p-4 rounded-xl border transition-all flex items-center justify-between group
+                                    ${approvedSynapses.has(i)
+                                        ? "bg-teal-900/10 border-teal-500/50 hover:bg-teal-900/20"
+                                        : "bg-black/40 border-white/10 opacity-60 hover:opacity-100"
+                                    }
+                                `}
+                            >
+                                <div className="flex items-center gap-4 flex-1">
+                                    <div className={`w-6 h-6 rounded-full flex items-center justify-center border ${approvedSynapses.has(i) ? "bg-teal-500 border-teal-500" : "border-slate-600"}`}>
+                                        {approvedSynapses.has(i) && <Check className="w-4 h-4 text-black" />}
+                                    </div>
+                                    <div>
+                                        <div className="flex items-center gap-2 text-sm">
+                                            <span className="text-slate-300">"{syn.source_label}"</span>
+                                            <div className="flex items-center gap-1 text-slate-500 text-xs px-2 bg-white/5 rounded-full">
+                                                <span>{syn.relation.toLowerCase()}</span>
+                                                <ArrowRight className="w-3 h-3" />
+                                            </div>
+                                            <span className="text-teal-300 font-semibold">"{syn.target_label}"</span>
+                                        </div>
+                                        <div className="text-xs text-slate-500 mt-1">
+                                            Discovery: {syn.confidence.toUpperCase()}
                                         </div>
                                     </div>
                                 </div>

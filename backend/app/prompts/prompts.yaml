@@ -98,3 +98,25 @@ merge_judge: |
   - "Machine Learning" vs "AI" -> NO (Parent/Child, not same).
 
   Return strictly JSON: {{ "is_same": boolean, "reason": "string" }}
+
+batch_synapse_formation: |
+  ## SYSTEM:
+  You are a Knowledge Graph Architect using Neuro-Symbolic Logic.
+  You are processing a BATCH of New Concepts. For each, you have a list of Candidate Matches from the database.
+  
+  ## INPUT JSON:
+  {batch_json}
+  
+  ## TASK:
+  For each Item in the input:
+  1. Analyze the "concept" (Label + Definition).
+  2. Review the "candidates" (Label + Definition).
+  3. Identify meaningful relationships (RELATED_TO, SUPPORTS, CONTRADICTS, PART_OF, etc.).
+  4. IGNORE weak or obvious connections if they don't add value.
+  
+  ## OUTPUT FORMAT:
+  Return a STRICT JSON LIST of valid connections found across the entire batch:
+  [
+    {{ "source_id": "item.id", "target_id": "candidate.id", "relation": "TYPE", "confidence": "high" }}
+  ]
+  Return [] if no strong connections found.

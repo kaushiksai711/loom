@@ -381,7 +381,7 @@ const MindmapContent = ({ sessionTitle, graphData, onNodeClick }: StructuredMind
 
     const handleNodeClick = (_: React.MouseEvent, node: Node) => {
         if (onNodeClick && (node.type === 'concept' || node.type === 'seed')) {
-            onNodeClick(node.data);
+            onNodeClick({ ...node.data, id: node.id });
         }
     };
 

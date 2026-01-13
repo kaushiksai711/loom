@@ -124,6 +124,7 @@ async def preview_crystallization(session_id: str):
 class CommitCrystallizationRequest(BaseModel):
     approved_merges: list
     new_nodes: list
+    approved_synapses: list = None # Optional
 
 @router.post("/crystallize/{session_id}/commit")
 async def commit_crystallization_endpoint(session_id: str, request: CommitCrystallizationRequest):
@@ -134,8 +135,66 @@ async def commit_crystallization_endpoint(session_id: str, request: CommitCrysta
         result = await rag_service.commit_crystallization(
             session_id, 
             request.approved_merges, 
-            request.new_nodes
+            request.new_nodes,
+            request.approved_synapses
         )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- Phase 11: Interactive Graph Editing ---
+
+class UpdateSeedRequest(BaseModel):
+    updates: dict
+
+@router.patch("/seed/{seed_id:path}")
+async def update_seed_endpoint(seed_id: str, request: UpdateSeedRequest, session_id: str):
+    """ Updates a draft concept (Seed). """
+    try:
+        await rag_service.update_seed(session_id, seed_id, request.updates)
+        return {"status": "success"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+        
+@router.delete("/seed/{seed_id:path}")
+async def delete_seed_endpoint(seed_id: str, session_id: str, force: bool = False):
+    """ Deletes a draft concept. """
+    try:
+        await rag_service.delete_seed(session_id, seed_id, force=force)
+        return {"status": "success"}
+    except ValueError as e:
+        # 422 Unprocessable Entity for "High Connectivity" warning? Or 400.
+        # User requested 409 Conflict logic, but 400 is fine for logic error.
+        raise HTTPException(status_code=400, detail=str(e))
+
+class UpdateEdgeRequest(BaseModel):
+    updates: dict
+
+@router.patch("/edge/{edge_id:path}")
+async def update_edge_endpoint(edge_id: str, request: UpdateEdgeRequest, session_id: str):
+    try:
+        await rag_service.update_edge(session_id, edge_id, request.updates)
+        return {"status": "success"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/edge/{edge_id:path}")
+async def delete_edge_endpoint(edge_id: str, session_id: str):
+    try:
+        await rag_service.delete_edge(session_id, edge_id)
+        return {"status": "success"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+class CreateEdgeRequest(BaseModel):
+    source_id: str
+    target_id: str
+    relation: str
+
+@router.post("/edge")
+async def create_edge_endpoint(request: CreateEdgeRequest, session_id: str):
+    try:
+        await rag_service.create_edge(session_id, request.source_id, request.target_id, request.relation)
+        return {"status": "success"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

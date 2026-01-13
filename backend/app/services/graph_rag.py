@@ -1303,7 +1303,105 @@ class GraphRAGService:
             "conflicts": conflicts
         }
 
-    async def commit_crystallization(self, session_id: str, approved_merges: List[Dict], new_nodes: List[Dict]):
+    async def preview_crystallization(self, session_id: str) -> Dict:
+        """
+        Generates a Preview including Merges AND Synapses.
+        """
+        # 1. Existing Logic (Merges)
+        preview_data = await self._generate_merge_proposals(session_id)
+        
+        # 2. New Logic (Synapse Preview)
+        # We need to simulate 'New Concepts' from the session's UserSeeds
+        # Fetch Seeds not yet crystallized
+        # Fetch Seeds not yet crystallized
+        aql_seeds = "FOR doc IN UserSeeds FILTER doc.session_id == @id AND doc.type IN ['concept', 'extracted_concept'] RETURN doc"
+        nodes = list(self.db.aql.execute(aql_seeds, bind_vars={"id": session_id}))
+        print(f"DEBUG_PREVIEW_SYNAPSES: Found {len(nodes)} nodes for session {session_id}")
+        
+        # Run Dry Run
+        # Note: _form_synapses handles empty lists gracefully
+        preview_data['proposed_synapses'] = await self._form_synapses(nodes, session_id, dry_run=True)
+        
+        return preview_data
+
+    async def _generate_merge_proposals(self, session_id: str) -> Dict:
+        """ Helper for preview logic. """
+        # Re-using the logic inside get_session_summary kinda, but we need it explicit.
+        # For MVP, we'll fetch existing seeds and run entity resolution check.
+        # This is a simplified simulation for V1.
+        
+        # 1. Fetch Session Seeds (Concept type)
+        aql_seeds = "FOR doc IN UserSeeds FILTER doc.session_id == @id AND doc.type IN ['concept', 'extracted_concept'] RETURN doc"
+        nodes = list(self.db.aql.execute(aql_seeds, bind_vars={"id": session_id}))
+        print(f"DEBUG_PREVIEW_MERGES: Found {len(nodes)} new nodes for session {session_id}")
+        
+        # 2. Entity Resolution (Propose Merges) - VECTOR ONLY OPTIMIZATION
+        merges = []
+        final_new_nodes = []
+        
+        print(f"[{session_id}] Resolving Entities (Vector-Only) for {len(nodes)} extracted concepts...")
+        
+        for node in nodes:
+            # Skip if no embedding
+            if 'embedding' not in node or not node['embedding']:
+                final_new_nodes.append(node)
+                continue
+            
+            # 2.1 Vector Search
+            # We look for the single best match in the Global Graph
+            # Thresholds:
+            # > 0.92: High Confidence (Almost certainly same)
+            # > 0.85: Medium Confidence (Likely same, user should check)
+            aql_dup = """
+            FOR doc IN Concepts
+                LET score = COSINE_SIMILARITY(doc.embedding, @embedding)
+                FILTER score > 0.85 
+                SORT score DESC
+                LIMIT 1
+                RETURN { label: doc.label, id: doc._id, definition: doc.definition, score: score }
+            """
+            cursor = self.db.aql.execute(aql_dup, bind_vars={
+                "embedding": node['embedding']
+            })
+            candidate = next(cursor, None)
+            
+            is_merged = False
+            
+            if candidate:
+                 score = candidate['score']
+                 # Automatic Proposal based on Score
+                 # No LLM needed -> User reviews it in Wizard anyway.
+                 
+                 status = "auto_merge"
+                 reason = f"High Vector Similarity ({score:.2f})"
+                 
+                 if score < 0.92:
+                     status = "ambiguous" 
+                     reason = f"Moderate Vector Similarity ({score:.2f})"
+
+                 merges.append({
+                     "source_id": node['_id'],
+                     "source_label": node['label'],
+                     "target_id": candidate['id'],
+                     "target_label": candidate['label'],
+                     "confidence": score,
+                     "reason": reason,
+                     "status": status
+                 })
+                 is_merged = True
+                 print(f"   -> Proposed Merge ({status}): '{node['label']}' ~= '{candidate['label']}' ({score:.2f})")
+            
+            if not is_merged:
+                final_new_nodes.append(node)
+
+        return {
+            "session_id": session_id,
+            "proposed_merges": merges, 
+            "new_nodes": final_new_nodes,
+            "conflicts": []
+        }
+
+    async def commit_crystallization(self, session_id: str, approved_merges: List[Dict], new_nodes: List[Dict], approved_synapses: List[Dict] = None):
         """
         Executes the merges and writes new concepts to the Global Graph.
         Archive Session.
@@ -1421,8 +1519,33 @@ class GraphRAGService:
                 
         print(f"Migrated {migrated_count} internal edges to Global Graph.")
 
-        # 3. Form Synapses (Auto-Association)
-        await self._form_synapses(created_concepts, session_id)
+        # 3. Form Synapses (Auto-Association OR Manual Approval)
+        if approved_synapses is not None:
+             # Manual Mode
+             print(f"Processing {len(approved_synapses)} User-Approved Synapses...")
+             for synapse in approved_synapses:
+                 # Map Source Seed -> New Concept ID
+                 src_seed_id = synapse.get('source_id')
+                 target_concept_id = synapse.get('target_id')
+                 relation = synapse.get('relation', 'RELATED_TO')
+                 
+                 global_src = seed_to_global_map.get(src_seed_id)
+                 
+                 if global_src and target_concept_id:
+                     edge = {
+                        "_from": global_src,
+                        "_to": target_concept_id,
+                        "type": relation,
+                        "source": "approved_synapse",
+                        "created_at": datetime.datetime.utcnow().isoformat()
+                     }
+                     try:
+                        self.db.collection("Relationships").insert(edge)
+                     except Exception as e:
+                        print(f"Failed to insert approved synapse: {e}")
+        else:
+            # Auto Mode (Legacy)
+             await self._form_synapses(created_concepts, session_id)
 
         self.db.aql.execute("""
             UPDATE @key WITH { status: 'crystallized', finalized_at: DATE_ISO8601(DATE_NOW()) } IN Sessions
@@ -1430,26 +1553,31 @@ class GraphRAGService:
         
         return {"status": "success", "message": f"Session Crystallized. {migrated_count} internal edges preserved."}
 
-    async def _form_synapses(self, new_concepts: List[Dict], session_id: str):
+
+    
+    async def _form_synapses(self, new_concepts: List[Dict], session_id: str, dry_run: bool = False) -> List[Dict]:
         """
         Smart Synapse Formation (Neuro-Symbolic).
-        1. Find Vector Candidates (Broad Recall, >0.75)
-        2. LLM Verification (Precision & Typing)
+        If dry_run=True, returns list of proposed edges instead of inserting.
         """
         from backend.app.services.llm import get_llm
         from langchain_core.messages import HumanMessage, SystemMessage
         import json
         
         llm = get_llm()
-        print(f"[{session_id}] Form Synapses (Smart Mode) for {len(new_concepts)} new concepts...")
+        print(f"[{session_id}] Form Synapses (Smart Mode) (DryRun={dry_run}) for {len(new_concepts)} new concepts...")
         
+        synapses = []
+        batch_items = []
+
+        # 1. PREPARE BATCHES (Vector Search)
         for concept in new_concepts:
             # Skip if no embedding
             if 'embedding' not in concept or not concept['embedding']:
                 continue
             
             label = concept.get('label', 'Unknown')
-            # 1. Vector Search (Broad)
+            # Vector Search
             aql = """
             FOR doc IN Concepts
                 FILTER doc._id != @concept_id
@@ -1468,13 +1596,41 @@ class GraphRAGService:
             candidates = list(cursor)
             if not candidates: continue
             
-            # 2. LLM Verification
-            candidate_labels = [c['label'] for c in candidates]
+            # Add to batch queue
+            batch_items.append({
+                "id": concept['_id'],
+                "label": label,
+                "definition": concept.get('definition', ''),
+                "candidates": candidates
+            })
             
-            prompt = prompts.get("synapse_formation", label=label, definition=concept.get('definition', ''), candidate_labels=json.dumps(candidate_labels))
+        print(f"[{session_id}] Found {len(batch_items)} concepts with potential candidates.")
+        
+        # 2. PROCESS BATCHES (LLM)
+        BATCH_SIZE = 15
+        chunks = [batch_items[i:i + BATCH_SIZE] for i in range(0, len(batch_items), BATCH_SIZE)]
+        
+        for i, chunk in enumerate(chunks):
+            print(f"[{session_id}] Processing Synapse Batch {i+1}/{len(chunks)} ({len(chunk)} items)...")
+            
+            # Minimize payload for LLM
+            lite_chunk = []
+            for item in chunk:
+                lite_candidates = [{"id": c['id'], "label": c['label']} for c in item['candidates']]
+                lite_chunk.append({
+                    "id": item['id'],
+                    "concept": item['label'],
+                    "definition": item['definition'],
+                    "candidates": lite_candidates
+                })
+            
+            batch_json = json.dumps(lite_chunk)
+            prompt = prompts.get("batch_synapse_formation", batch_json=batch_json)
             
             try:
+                # Rate Limit Check
                 await global_limiter.wait_for_token()
+                
                 response = await llm.ainvoke([
                     SystemMessage(content="You are a Knowledge Graph Architect. Output strictly JSON."),
                     HumanMessage(content=prompt)
@@ -1483,32 +1639,160 @@ class GraphRAGService:
                 content = response.content.replace("```json", "").replace("```", "").strip()
                 connections = json.loads(content)
                 
-                # 3. Create Verified Edges
+                # 3. Handle Connections
                 for conn in connections:
-                    target_label = conn.get('target')
-                    relation_type = conn.get('relation', 'related_to').upper().replace(' ', '_')
+                    source_id = conn.get('source_id')
+                    target_id = conn.get('target_id')
+                    relation = conn.get('relation', 'RELATED_TO').upper().replace(' ', '_')
                     
-                    # Find target ID
-                    target_match = next((c for c in candidates if c['label'] == target_label), None)
+                    # Verify IDs exist in our chunk mapping to be safe? 
+                    # LLM usually respects IDs given.
                     
-                    if target_match:
-                         edge = {
-                            "_from": concept['_id'],
-                            "_to": target_match['id'],
-                            "type": relation_type,
+                    # Find Source Concept Details for log/preview
+                    source_item = next((x for x in chunk if x['id'] == source_id), None)
+                    target_candidate = None
+                    if source_item:
+                        target_candidate = next((c for c in source_item['candidates'] if c['id'] == target_id), None)
+                    
+                    source_label = source_item['label'] if source_item else "Unknown"
+                    target_label = target_candidate['label'] if target_candidate else "Unknown"
+                    
+                    if dry_run:
+                        synapses.append({
+                            "source_id": source_id,
+                            "source_label": source_label,
+                            "target_label": target_label,
+                            "relation": relation,
+                            "confidence": "high",
+                            "target_id": target_id
+                        })
+                    else:
+                        edge = {
+                            "_from": source_id,
+                            "_to": target_id,
+                            "type": relation,
                             "source": "smart_synapse",
                             "created_at": datetime.datetime.utcnow().isoformat()
                         }
-                         # Safe Insert
-                         try:
-                             self.db.collection("Relationships").insert(edge)
-                             print(f"   -> Synapse Verified: '{label}' --[{relation_type}]--> '{target_label}'")
-                         except:
-                             pass
-                             
+                        try:
+                            self.db.collection("Relationships").insert(edge)
+                            print(f"   -> Batch Verified: '{source_label}' --[{relation}]--> '{target_label}'")
+                        except:
+                            pass
+                            
             except Exception as e:
-                print(f"   ⚠️ Synapse LLM Error: {e}")
-                # Fallback to vector links? No, stick to high precision for now.
+                print(f"   ⚠️ Batch Synapse Error: {e}")
+                if "429" in str(e):
+                    print("   ⚠️ Quota Exceeded. Returning partial results.")
+                    break
+        
+        return synapses
+
+    # --- Phase 11: Graph Editing (Seeds & Edges) ---
+
+    async def update_seed(self, session_id: str, seed_id: str, updates: Dict) -> bool:
+        """
+        Updates a UserSeed OR a Global Concept (if ID matches).
+        """
+        collection_name = "UserSeeds"
+        if seed_id.startswith("Concepts/"):
+            collection_name = "Concepts"
+
+        node = self.db.collection(collection_name).get(seed_id)
+        
+        # Ownership check:
+        # If UserSeed, must match session_id.
+        # If Concept, we allow editing for now (Single User assumptions).
+        if collection_name == "UserSeeds":
+            if not node or node.get('session_id') != session_id:
+                raise ValueError("Seed not found or does not belong to this session.")
+        else:
+             if not node: raise ValueError("Concept not found.")
+        
+        # Allowed fields
+        valid_updates = {k: v for k, v in updates.items() if k in ['label', 'definition', 'type', 'name', 'text']}
+        
+        # Sync label/name if one changes
+        if 'label' in valid_updates:
+            valid_updates['name'] = valid_updates['label']
+            
+        update_doc = {"_key": node['_key']}
+        update_doc.update(valid_updates)
+        self.db.collection(collection_name).update(update_doc)
+        return True
+
+    async def delete_seed(self, session_id: str, seed_id: str, force: bool = False) -> bool:
+        """
+        Deletes a UserSeed and its connected edges.
+        SAFETY: Checks edge count before deletion unless force=True.
+        """
+        seed = self.db.collection("UserSeeds").get(seed_id)
+        if not seed or seed.get('session_id') != session_id:
+             raise ValueError("Seed not found.")
+        
+        # Safety Check
+        edge_query = """
+        FOR e IN UserSeeds 
+            FILTER (e.source_id == @id OR e.target_id == @id) AND e.type == 'extracted_relation'
+            RETURN 1
+        """
+        edge_count = len(list(self.db.aql.execute(edge_query, bind_vars={"id": seed_id})))
+        
+        if edge_count > 5 and not force:
+             raise ValueError(f"High-connectivity node ({edge_count} edges). Confirm deletion with force=true.")
+
+        # Delete Edges (Cascade)
+        # Filter by FULL ID (UserSeeds/key)
+        self.db.aql.execute("""
+            FOR doc IN UserSeeds
+                FILTER (doc.source_id == @id OR doc.target_id == @id) AND doc.type == 'extracted_relation'
+                REMOVE doc IN UserSeeds
+        """, bind_vars={"id": seed['_id']})
+        
+        # Delete Node
+        self.db.collection("UserSeeds").delete(seed_id)
+        return True
+
+    async def update_edge(self, session_id: str, edge_id: str, updates: Dict) -> bool:
+         """ Updates a session edge (UserSeed relationship). """
+         edge = self.db.collection("UserSeeds").get(edge_id)
+         if not edge or edge.get('session_id') != session_id or edge.get('type') != 'extracted_relation':
+              raise ValueError("Edge not found.")
+              
+         valid_updates = {k: v for k, v in updates.items() if k in ['relation', 'type']}
+         update_doc = {"_key": edge['_key']}
+         update_doc.update(valid_updates)
+         self.db.collection("UserSeeds").update(update_doc)
+         return True
+
+    async def delete_edge(self, session_id: str, edge_id: str) -> bool:
+         """ Deletes a session edge. """
+         edge = self.db.collection("UserSeeds").get(edge_id)
+         if not edge or edge.get('session_id') != session_id:
+             raise ValueError("Edge not found.")
+         
+         self.db.collection("UserSeeds").delete(edge_id)
+         return True
+
+    async def create_edge(self, session_id: str, source_id: str, target_id: str, relation: str) -> bool:
+         """ Manual creation of a session edge. """
+         # Verify nodes exist
+         src = self.db.collection("UserSeeds").get(source_id)
+         tgt = self.db.collection("UserSeeds").get(target_id)
+         
+         if not src or not tgt: raise ValueError("Source or Target node not found.")
+         
+         edge_doc = {
+             "source_id": source_id,
+             "target_id": target_id,
+             "relation": relation,
+             "type": "extracted_relation",
+             "session_id": session_id,
+             "created_at": datetime.datetime.utcnow().isoformat(),
+             "source": "manual_edit"
+         }
+         self.db.collection("UserSeeds").insert(edge_doc)
+         return True
 
     async def generate_mermaid_diagram(self, session_id: str) -> str:
         """

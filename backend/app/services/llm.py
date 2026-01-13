@@ -16,10 +16,10 @@ from backend.app.core.config import settings
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 
-def get_llm(model: str = "gemini-2.5-flash-lite"):
+def get_llm(model: str = "gemini-2.5-flash"):
     return ChatGoogleGenerativeAI(
         model=model,
         google_api_key=settings.GEMINI_API_KEY,
         temperature=0,
-        max_retries=3,
+        max_retries=2,
     )
