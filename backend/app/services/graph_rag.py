@@ -936,7 +936,8 @@ class GraphRAGService:
                          
                          definition = c.get('definition', "")
                          if not definition and c.get('operational_details'):
-                             definition = c.get('operational_details', {}).get("implementation_steps", [""])[0]
+                             steps = c.get('operational_details', {}).get("implementation_steps", [])
+                             definition = steps[0] if steps else ""
                          
                          # Embed might fail?
                          emb = []
@@ -1305,24 +1306,23 @@ class GraphRAGService:
 
     async def preview_crystallization(self, session_id: str) -> Dict:
         """
-        Generates a Preview including Merges AND Synapses.
+        Generates a Preview including Merges, Conflicts, and Synapses using Unified Omni-Batch AI.
         """
-        # 1. Existing Logic (Merges)
-        preview_data = await self._generate_merge_proposals(session_id)
-        
-        # 2. New Logic (Synapse Preview)
-        # We need to simulate 'New Concepts' from the session's UserSeeds
-        # Fetch Seeds not yet crystallized
-        # Fetch Seeds not yet crystallized
+        # 1. Fetch Candidates (New Concepts)
         aql_seeds = "FOR doc IN UserSeeds FILTER doc.session_id == @id AND doc.type IN ['concept', 'extracted_concept'] RETURN doc"
         nodes = list(self.db.aql.execute(aql_seeds, bind_vars={"id": session_id}))
-        print(f"DEBUG_PREVIEW_SYNAPSES: Found {len(nodes)} nodes for session {session_id}")
+        print(f"DEBUG_PREVIEW_OMNI: Found {len(nodes)} nodes for session {session_id}")
         
-        # Run Dry Run
-        # Note: _form_synapses handles empty lists gracefully
-        preview_data['proposed_synapses'] = await self._form_synapses(nodes, session_id, dry_run=True)
+        # 2. Run ONE Unified Analysis Pass
+        analysis_results = await self._analyze_crystallization_batch(nodes, session_id)
         
-        return preview_data
+        return {
+            "session_id": session_id,
+            "proposed_merges": analysis_results['merges'],
+            "conflicts": analysis_results['conflicts'],
+            "proposed_synapses": analysis_results['synapses'],
+            "new_nodes": nodes # Frontend filters out merged ones usually, or we can refine logic layer
+        }
 
     async def _generate_merge_proposals(self, session_id: str) -> Dict:
         """ Helper for preview logic. """
@@ -1555,19 +1555,24 @@ class GraphRAGService:
 
 
     
-    async def _form_synapses(self, new_concepts: List[Dict], session_id: str, dry_run: bool = False) -> List[Dict]:
+    async def _analyze_crystallization_batch(self, new_concepts: List[Dict], session_id: str) -> Dict[str, List[Dict]]:
         """
-        Smart Synapse Formation (Neuro-Symbolic).
-        If dry_run=True, returns list of proposed edges instead of inserting.
+        Omni-Batch Analysis: Merges, Conflicts, and Synapses in ONE pass.
+        Replaces legacy _form_synapses for the preview flow.
         """
         from backend.app.services.llm import get_llm
         from langchain_core.messages import HumanMessage, SystemMessage
         import json
         
         llm = get_llm()
-        print(f"[{session_id}] Form Synapses (Smart Mode) (DryRun={dry_run}) for {len(new_concepts)} new concepts...")
+        print(f"[{session_id}] Omni-Batch Analysis for {len(new_concepts)} concepts...")
         
-        synapses = []
+        results = {
+            "synapses": [],
+            "merges": [],
+            "conflicts": []
+        }
+        
         batch_items = []
 
         # 1. PREPARE BATCHES (Vector Search)
@@ -1577,7 +1582,8 @@ class GraphRAGService:
                 continue
             
             label = concept.get('label', 'Unknown')
-            # Vector Search
+            
+            # Vector Search (Same as before)
             aql = """
             FOR doc IN Concepts
                 FILTER doc._id != @concept_id
@@ -1585,7 +1591,7 @@ class GraphRAGService:
                 FILTER score > 0.75
                 SORT score DESC
                 LIMIT 8
-                RETURN { label: doc.label, id: doc._id, definition: doc.definition }
+                RETURN { label: doc.label, id: doc._id, definition: doc.definition, score: score }
             """
             
             cursor = self.db.aql.execute(aql, bind_vars={
@@ -1604,16 +1610,16 @@ class GraphRAGService:
                 "candidates": candidates
             })
             
-        print(f"[{session_id}] Found {len(batch_items)} concepts with potential candidates.")
+        print(f"[{session_id}] Found {len(batch_items)} concepts with candidates.")
         
         # 2. PROCESS BATCHES (LLM)
         BATCH_SIZE = 15
         chunks = [batch_items[i:i + BATCH_SIZE] for i in range(0, len(batch_items), BATCH_SIZE)]
         
         for i, chunk in enumerate(chunks):
-            print(f"[{session_id}] Processing Synapse Batch {i+1}/{len(chunks)} ({len(chunk)} items)...")
+            print(f"[{session_id}] Processing Batch {i+1}/{len(chunks)} ({len(chunk)} items)...")
             
-            # Minimize payload for LLM
+            # Minimize payload
             lite_chunk = []
             for item in chunk:
                 lite_candidates = [{"id": c['id'], "label": c['label']} for c in item['candidates']]
@@ -1625,7 +1631,7 @@ class GraphRAGService:
                 })
             
             batch_json = json.dumps(lite_chunk)
-            prompt = prompts.get("batch_synapse_formation", batch_json=batch_json)
+            prompt = prompts.get("batch_crystallization_analysis", batch_json=batch_json)
             
             try:
                 # Rate Limit Check
@@ -1639,54 +1645,86 @@ class GraphRAGService:
                 content = response.content.replace("```json", "").replace("```", "").strip()
                 connections = json.loads(content)
                 
-                # 3. Handle Connections
-                for conn in connections:
-                    source_id = conn.get('source_id')
-                    target_id = conn.get('target_id')
-                    relation = conn.get('relation', 'RELATED_TO').upper().replace(' ', '_')
+                # 3. Handle Connections (Polymorphic)
+                for item in connections:
+                    item_type = item.get('type', '').upper()
+                    source_id = item.get('source_id')
+                    target_id = item.get('target_id')
                     
-                    # Verify IDs exist in our chunk mapping to be safe? 
-                    # LLM usually respects IDs given.
-                    
-                    # Find Source Concept Details for log/preview
+                    # Resolve Source Label (for logs/frontend)
                     source_item = next((x for x in chunk if x['id'] == source_id), None)
                     target_candidate = None
                     if source_item:
-                        target_candidate = next((c for c in source_item['candidates'] if c['id'] == target_id), None)
+                         target_candidate = next((c for c in source_item['candidates'] if c['id'] == target_id), None)
                     
                     source_label = source_item['label'] if source_item else "Unknown"
                     target_label = target_candidate['label'] if target_candidate else "Unknown"
-                    
-                    if dry_run:
-                        synapses.append({
+
+                    if item_type == "MERGE":
+                        results['merges'].append({
+                            "source_id": source_id,
+                            "source_label": source_label,
+                            "target_id": target_id,
+                            "target_label": target_label,
+                            "confidence": item.get('confidence', 0.9),
+                            "reason": item.get('reason', 'AI proposed merge'),
+                            "status": "auto_merge"
+                        })
+                        print(f"   -> MERGE: '{source_label}' == '{target_label}'")
+
+                    elif item_type == "CONFLICT":
+                         results['conflicts'].append({
+                            "seed_text": source_label,
+                            "conflicting_evidence": target_label,
+                            "reason": item.get('reason', 'Logical contradiction')
+                         })
+                         print(f"   -> CONFLICT: '{source_label}' vs '{target_label}'")
+
+                    elif item_type == "LINK":
+                        results['synapses'].append({
                             "source_id": source_id,
                             "source_label": source_label,
                             "target_label": target_label,
-                            "relation": relation,
+                            "relation": item.get('relation', 'RELATED_TO').upper().replace(' ', '_'),
                             "confidence": "high",
                             "target_id": target_id
                         })
-                    else:
-                        edge = {
-                            "_from": source_id,
-                            "_to": target_id,
-                            "type": relation,
-                            "source": "smart_synapse",
-                            "created_at": datetime.datetime.utcnow().isoformat()
-                        }
-                        try:
-                            self.db.collection("Relationships").insert(edge)
-                            print(f"   -> Batch Verified: '{source_label}' --[{relation}]--> '{target_label}'")
-                        except:
-                            pass
+                        # print(f"   -> SYNAPSE: '{source_label}' -> '{target_label}'")
                             
             except Exception as e:
-                print(f"   ⚠️ Batch Synapse Error: {e}")
+                print(f"   ⚠️ Omni-Batch Error: {e}")
                 if "429" in str(e):
                     print("   ⚠️ Quota Exceeded. Returning partial results.")
                     break
         
-        return synapses
+        return results
+
+    async def _form_synapses(self, new_concepts: List[Dict], session_id: str, dry_run: bool = False) -> List[Dict]:
+        """ Wrapper for backward compatibility """
+        # Only used by commit_crystallization for legacy auto-mode, or if someone calls it directly.
+        # We can just call the new omni-batch and return the synapses part.
+        results = await self._analyze_crystallization_batch(new_concepts, session_id)
+        
+        if not dry_run:
+             # If strictly old legacy mode wanted to INSERT, we'd need to loop and insert here.
+             # But 'commit_crystallization' calls this with dry_run=False? 
+             # Wait, the old code INSERTED in the loop if not dry_run.
+             # The new code DOES NOT INSERT. It just returns data.
+             # FIX: If not dry run, we must insert the synapses.
+             print(f"[{session_id}] Legacy _form_synapses called (Insert Mode). Inserting {len(results['synapses'])} synapses.")
+             for syn in results['synapses']:
+                 edge = {
+                    "_from": syn['source_id'],
+                    "_to": syn['target_id'],
+                    "type": syn['relation'],
+                    "source": "smart_synapse",
+                    "created_at": datetime.datetime.utcnow().isoformat()
+                }
+                 try:
+                     self.db.collection("Relationships").insert(edge)
+                 except: pass
+                 
+        return results['synapses']
 
     # --- Phase 11: Graph Editing (Seeds & Edges) ---
 

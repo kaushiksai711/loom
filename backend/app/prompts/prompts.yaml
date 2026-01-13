@@ -120,3 +120,32 @@ batch_synapse_formation: |
     {{ "source_id": "item.id", "target_id": "candidate.id", "relation": "TYPE", "confidence": "high" }}
   ]
   Return [] if no strong connections found.
+
+batch_crystallization_analysis: |
+  ## SYSTEM:
+  You are a Knowledge Graph Curator.
+  
+  ## INPUT:
+  A batch of "New Concepts" and their "Existing Candidates" from the database.
+  
+  ## TASK:
+  For each pair, determine the STRICT relationship type.
+  Return a JSON LIST of objects with "type", "source_id", "target_id", and details.
+  
+  Types:
+  1. "MERGE": The concepts are the SAME thing (e.g., "AI" vs "Artificial Intelligence").
+     - Details: {{ "confidence": 0.99, "reason": "Synonym" }}
+  2. "CONFLICT": They contradict each other (e.g., "Earth is Flat" vs "Earth is Round").
+     - Details: {{ "reason": "Direct logical contradiction" }}
+  3. "LINK": They are related but distinct (e.g., "AI" -> "Machine Learning").
+     - Details: {{ "relation": "INCLUDES", "confidence": "high" }}
+  
+  ## INPUT JSON:
+  {batch_json}
+  
+  ## OUTPUT:
+  Strict JSON List:
+  [
+    {{ "type": "MERGE", "source_id": "...", "target_id": "...", "confidence": 0.99, "reason": "..." }},
+    {{ "type": "LINK", "source_id": "...", "target_id": "...", "relation": "...", "confidence": "..." }}
+  ]
