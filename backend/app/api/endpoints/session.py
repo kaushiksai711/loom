@@ -198,3 +198,136 @@ async def create_edge_endpoint(request: CreateEdgeRequest, session_id: str):
         return {"status": "success"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+# --- Phase 12: Generative Scaffolding ---
+
+@router.get("/concept/{concept_id:path}/scaffold")
+async def get_concept_scaffold(concept_id: str):
+    """
+    Returns 4-format learning scaffold for a concept.
+    Lazy generation: First request triggers LLM, subsequent requests are cached.
+    """
+    try:
+        scaffold = await rag_service.generate_scaffold(concept_id)
+        return scaffold
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Phase 12: Signal Capture (Layer B4) ---
+
+from backend.app.models.session_signal import SessionSignalCreate
+from backend.app.db.arango import db
+from datetime import datetime
+
+@router.post("/{session_id}/signal")
+async def log_signal(session_id: str, signal: SessionSignalCreate):
+    """
+    Log a user interaction with a scaffold format.
+    Used for learning analytics and adaptive priming.
+    """
+    try:
+        arango_db = db.get_db()
+        
+        # Ensure collection exists
+        if not arango_db.has_collection("SessionSignals"):
+            arango_db.create_collection("SessionSignals")
+        
+        signal_doc = {
+            "session_id": session_id,
+            "concept_id": signal.concept_id,
+            "format_chosen": signal.format_chosen,
+            "dwell_time_ms": signal.dwell_time_ms,
+            "time_since_last_interaction_ms": signal.time_since_last_interaction_ms,
+            "interaction_type": signal.interaction_type,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        arango_db.collection("SessionSignals").insert(signal_doc)
+        return {"status": "logged", "session_id": session_id}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{session_id}/signals")
+async def get_signals(session_id: str):
+    """
+    Retrieve all signals for a session (for debrief/analytics).
+    """
+    try:
+        arango_db = db.get_db()
+        
+        if not arango_db.has_collection("SessionSignals"):
+            return []
+        
+        aql = "FOR s IN SessionSignals FILTER s.session_id == @id SORT s.created_at ASC RETURN s"
+        signals = list(arango_db.aql.execute(aql, bind_vars={"id": session_id}))
+        return signals
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{session_id}/debrief")
+async def get_session_debrief(session_id: str):
+    """
+    Generate session learning debrief with format analytics.
+    Shows: concepts explored, format distribution, preferred format, reflection prompt.
+    """
+    try:
+        arango_db = db.get_db()
+        
+        # Get signals
+        if not arango_db.has_collection("SessionSignals"):
+            signals = []
+        else:
+            aql = "FOR s IN SessionSignals FILTER s.session_id == @id RETURN s"
+            signals = list(arango_db.aql.execute(aql, bind_vars={"id": session_id}))
+        
+        # Aggregate stats
+        format_counts = {"hands_on": 0, "visual": 0, "socratic": 0, "textual": 0}
+        concepts_viewed = set()
+        total_dwell = 0
+        
+        for s in signals:
+            fmt = s.get("format_chosen")
+            if fmt in format_counts:
+                format_counts[fmt] += 1
+            concepts_viewed.add(s.get("concept_id"))
+            total_dwell += s.get("dwell_time_ms", 0)
+        
+        # Find dominant format
+        dominant = max(format_counts, key=format_counts.get) if signals else "textual"
+        total_interactions = sum(format_counts.values())
+        
+        # Generate reflection prompt based on dominant format
+        format_names = {
+            "hands_on": "Code examples",
+            "visual": "Visual diagrams", 
+            "socratic": "Thinking questions",
+            "textual": "Text explanations"
+        }
+        
+        reflection_prompt = f"You explored concepts mostly using {format_names[dominant]}. What made that approach work for you?"
+        
+        # Technique suggestion
+        suggestion_map = {
+            "hands_on": "Try the 'Think' tab next session to deepen conceptual understanding.",
+            "visual": "Try the 'Code' tab to see practical implementations.",
+            "socratic": "Try the 'Visual' tab to see relationships between ideas.",
+            "textual": "Try the 'Think' tab to test your understanding with questions."
+        }
+        
+        return {
+            "session_id": session_id,
+            "concepts_explored": len(concepts_viewed),
+            "total_interactions": total_interactions,
+            "total_time_ms": total_dwell,
+            "format_distribution": format_counts,
+            "preferred_format": dominant,
+            "reflection_prompt": reflection_prompt,
+            "technique_suggestion": suggestion_map.get(dominant, "Keep exploring different formats!")
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

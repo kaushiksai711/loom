@@ -7,6 +7,7 @@ import { Calendar, Clock, Edit2, Check, X, FileText, Brain, Share2, Layers, Down
 import ThreeDMindmap from "@/components/ThreeDMindmap";
 import StructuredMindmap from "@/components/StructuredMindmap";
 import CrystallizationWizard from "@/components/CrystallizationWizard";
+import SessionDebrief from "@/components/SessionDebrief";
 
 interface TimelineEvent {
     type: "evidence" | "thought" | "analysis";
@@ -61,6 +62,8 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
     const [editContent, setEditContent] = useState("");
     const [editDescription, setEditDescription] = useState("");
     const [selectedNode, setSelectedNode] = useState<any>(null);
+    const [showWizard, setShowWizard] = useState(false);
+    const [showDebrief, setShowDebrief] = useState(false);
 
     useEffect(() => {
         if (!id) return;
@@ -344,13 +347,24 @@ export default function SessionReport({ params }: { params: Promise<{ id: string
                         <CrystallizationWizard
                             sessionId={id as string}
                             onComplete={() => {
-                                alert("Session Crystalized and Archived. Redirecting to Brain...");
-                                router.push('/');
+                                setShowWizard(false);
+                                setShowDebrief(true);
                             }}
                         />
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            {/* Phase 12: Session Debrief Modal */}
+            {showDebrief && (
+                <SessionDebrief
+                    sessionId={id as string}
+                    onClose={() => {
+                        setShowDebrief(false);
+                        router.push('/');
+                    }}
+                />
+            )}
 
             {/* Node Detail Modal */}
             <AnimatePresence>

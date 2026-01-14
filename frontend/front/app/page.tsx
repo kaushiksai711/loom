@@ -12,6 +12,7 @@ import ChatInterface, { ChatIntent } from "@/components/ChatInterface";
 import RightSidebar from "@/components/RightSidebar";
 import SessionManager from "@/components/SessionManager";
 import { AvatarState } from "@/components/AvatarSlime";
+import ConceptCard from "@/components/ConceptCard";
 
 // Dynamically import GraphVisualization to avoid SSR issues with Canvas
 const GraphVisualization = dynamic(() => import("@/components/GraphVisualization"), {
@@ -44,6 +45,7 @@ export default function Home() {
   };
   const [isCrystallized, setIsCrystallized] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [showConceptCard, setShowConceptCard] = useState(false);
 
   // Graph Data State
   const [graphData, setGraphData] = useState<{ nodes: any[], links: any[] }>({
@@ -582,6 +584,14 @@ export default function Home() {
                         >
                           Inspect Source
                         </button>
+
+                        {/* NEW: Learn This Concept Button */}
+                        <button
+                          onClick={() => setShowConceptCard(true)}
+                          className="text-xs bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 px-3 py-1.5 rounded-lg text-white font-medium transition-all shadow-lg shadow-purple-500/20"
+                        >
+                          🎓 Learn This
+                        </button>
                       </div>
                     </div>
                   </>
@@ -693,6 +703,16 @@ export default function Home() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Phase 12: Concept Card Modal */}
+      {showConceptCard && selectedNode && (
+        <ConceptCard
+          conceptId={selectedNode.id}
+          label={selectedNode.label || selectedNode.id.split('/').pop() || 'Concept'}
+          sessionId={sessionID}
+          onClose={() => setShowConceptCard(false)}
+        />
       )}
     </div>
   );

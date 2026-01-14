@@ -1124,6 +1124,83 @@ class GraphRAGService:
             }
         }
 
+    # --- Phase 12: Generative Scaffolding ---
+    
+    async def generate_scaffold(self, concept_id: str) -> Dict:
+        """
+        Generate or retrieve cached 4-format scaffold for a concept.
+        Lazy generation: Only generates on first request.
+        
+        Returns:
+            {
+                "hands_on": { "language": "python", "content": "..." },
+                "visual": { "content": "flowchart TD..." },
+                "socratic": { "questions": ["Q1", "Q2", "Q3"] },
+                "textual": { "content": "...", "analogy": "..." }
+            }
+        """
+        # 1. Fetch Concept
+        # concept_id can be _id (Concepts/xxx) or _key (xxx)
+        key = concept_id.split("/")[-1] if "/" in concept_id else concept_id
+        
+        try:
+            concept = self.db.collection("Concepts").get(key)
+        except Exception:
+            concept = None
+        
+        if not concept:
+            raise ValueError(f"Concept {concept_id} not found")
+        
+        # 2. Check Cache
+        if concept.get("representations"):
+            print(f"[Scaffold] Cache HIT for '{concept.get('label')}'")
+            return concept["representations"]
+        
+        print(f"[Scaffold] Generating for '{concept.get('label')}'...")
+        
+        # 3. Generate via LLM
+        llm = get_llm()
+        
+        prompt = prompts.get("generative_scaffolding",
+            concept_label=concept.get("label", "Unknown Concept"),
+            concept_definition=concept.get("definition", "No definition available."),
+            source_context=concept.get("source_text", "")[:2000]
+        )
+        
+        try:
+            await global_limiter.wait_for_token()
+            
+            response = await llm.ainvoke([
+                SystemMessage(content="You are a world-class educator. Output strictly valid JSON."),
+                HumanMessage(content=prompt)
+            ])
+            
+            content = response.content.replace("```json", "").replace("```", "").strip()
+            representations = json.loads(content)
+            
+            # 4. Cache in DB
+            self.db.collection("Concepts").update({
+                "_key": key,
+                "representations": representations,
+                "scaffold_generated_at": datetime.datetime.utcnow().isoformat()
+            })
+            
+            print(f"[Scaffold] Generated and cached for '{concept.get('label')}'")
+            return representations
+            
+        except json.JSONDecodeError as e:
+            print(f"[Scaffold] JSON Parse Error: {e}")
+            # Return fallback scaffold
+            return {
+                "hands_on": {"language": "text", "content": "# Scaffold generation failed. Please try again."},
+                "visual": {"content": "flowchart TD\n  A[Error] --> B[Try Again]"},
+                "socratic": {"questions": ["What do you already know about this topic?", "What would help you understand it better?", "How might you apply this knowledge?"]},
+                "textual": {"content": concept.get("definition", "No definition available."), "analogy": ""}
+            }
+        except Exception as e:
+            print(f"[Scaffold] Generation Error: {e}")
+            raise
+
 
     async def update_session_content(self, session_id: str, item_id: str, new_content: str):
         """

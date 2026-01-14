@@ -149,3 +149,62 @@ batch_crystallization_analysis: |
     {{ "type": "MERGE", "source_id": "...", "target_id": "...", "confidence": 0.99, "reason": "..." }},
     {{ "type": "LINK", "source_id": "...", "target_id": "...", "relation": "...", "confidence": "..." }}
   ]
+
+generative_scaffolding: |
+  You are a world-class educator creating multi-modal learning content.
+  Your goal is to help a learner deeply understand this concept through 4 different formats.
+  
+  CONCEPT: {concept_label}
+  DEFINITION: {concept_definition}
+  SOURCE CONTEXT: {source_context}
+  
+  Generate 4 learning representations:
+  
+  1. **hands_on** (Code Example)
+     - Working, executable code demonstrating the concept
+     - Include helpful comments explaining each step
+     - Language: Python preferred, or whatever is most appropriate
+     - Keep it concise (15-30 lines max)
+  
+  2. **visual** (Mermaid Diagram)
+     - Valid Mermaid.js flowchart syntax ONLY
+     - Show relationships, flow, or structure
+     - Keep it simple (max 6-8 nodes)
+     
+     **CRITICAL MERMAID RULES (MUST FOLLOW):**
+     - Node labels must be PLAIN TEXT only - no math symbols
+     - FORBIDDEN in labels: ( ) [ ] { } < > | ^ / \ " ' = != 
+     - Use WORDS instead: "divided by" not "/", "not equal" not "!="
+     - Keep labels SHORT (2-4 words max)
+     - Use simple edge labels: A --> |relates to| B
+     - Start with: flowchart TD or flowchart LR
+     - Example of GOOD label: A[Data Input]
+     - Example of BAD label: A[f(x) = x^2 / (n-1)]
+  
+  3. **socratic** (Thinking Questions)
+     - 3 progressive questions (easy → medium → hard)
+     - DO NOT reveal answers - let the learner discover
+     - Questions should trigger genuine insight
+  
+  4. **textual** (Narrative + Analogy)
+     - 2-3 paragraph clear explanation
+     - Include a powerful real-world analogy
+     - Written for a curious beginner, not an expert
+  
+  OUTPUT FORMAT (Strict JSON):
+  {{
+    "hands_on": {{
+      "language": "python",
+      "content": "# Code here..."
+    }},
+    "visual": {{
+      "content": "flowchart TD\n  A[Start] --> B[Process]\n  B --> C[End]"
+    }},
+    "socratic": {{
+      "questions": ["Q1?", "Q2?", "Q3?"]
+    }},
+    "textual": {{
+      "content": "Explanation paragraph...",
+      "analogy": "Think of X like Y because..."
+    }}
+  }}
