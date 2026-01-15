@@ -114,6 +114,41 @@ async def chat_session(request: ChatRequest):
             HumanMessage(content=request.message)
         ])
         
+        # --- Phase 13: Log Chat Signal ---
+        try:
+            from backend.app.db.arango import db
+            from datetime import datetime
+            
+            arango_db = db.get_db()
+            
+            # Ensure collection exists
+            if not arango_db.has_collection("SessionSignals"):
+                arango_db.create_collection("SessionSignals")
+            
+            # Extract concept labels from context for tracking
+            concepts_referenced = [
+                item.get("label", "Unknown")[:100] 
+                for item in clean_context[:5]  # Top 5 concepts
+                if item.get("label")
+            ]
+            
+            chat_signal = {
+                "session_id": request.session_id,
+                "signal_type": "chat_interaction",
+                "prompt": request.message[:500],  # Truncate for storage
+                "prompt_length": len(request.message),
+                "response_length": len(response.content),
+                "concepts_referenced": concepts_referenced,
+                "created_at": datetime.utcnow().isoformat()
+            }
+            
+            arango_db.collection("SessionSignals").insert(chat_signal)
+            print(f"[Analytics] Logged chat signal: {len(concepts_referenced)} concepts referenced")
+            
+        except Exception as log_error:
+            print(f"[Analytics] Warning: Failed to log chat signal: {log_error}")
+            # Don't fail the request if logging fails
+        
         return {
             "response": response.content,
             "conflicts": conflict_warnings,

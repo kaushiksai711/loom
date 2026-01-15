@@ -33,31 +33,50 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
     const [scaffold, setScaffold] = useState<Scaffold | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [lastInteraction, setLastInteraction] = useState<number>(Date.now());
+
+    // Phase 13: Track actual dwell time
+    const [tabStartTime, setTabStartTime] = useState<number>(Date.now());
 
     // Guard against double fetch (React StrictMode in dev)
     const hasFetched = useRef(false);
 
-    // Fetch scaffold on mount
+    // Fetch preference then scaffold on mount
     useEffect(() => {
         // Prevent double fetch in React StrictMode
         if (hasFetched.current) return;
         hasFetched.current = true;
 
-        fetchScaffold();
+        initConceptCard();
     }, [conceptId]);
 
-    const fetchScaffold = async () => {
+    const initConceptCard = async () => {
         setLoading(true);
         setError(null);
+
         try {
+            // Phase 13: Fetch user's preferred format FIRST
+            try {
+                const prefRes = await fetch(`/api/v1/session/${sessionId}/preference`);
+                if (prefRes.ok) {
+                    const { preferred_format, confidence } = await prefRes.json();
+                    if (confidence !== 'low' && preferred_format) {
+                        setActiveTab(preferred_format);
+                        console.log(`[ConceptCard] Using preferred format: ${preferred_format}`);
+                    }
+                }
+            } catch (e) {
+                console.warn('Could not fetch preference, using default:', e);
+            }
+
+            // Then fetch scaffold
             const res = await fetch(`/api/v1/session/concept/${conceptId}/scaffold`);
             if (!res.ok) throw new Error('Failed to load scaffold');
             const data = await res.json();
             setScaffold(data);
 
-            // Log initial view signal (the default 'textual' tab)
-            logSignal('textual', 'scaffold_click');
+            // Log initial view signal
+            setTabStartTime(Date.now());
+            logSignal(activeTab, 'scaffold_click', 0);
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Unknown error');
         } finally {
@@ -65,12 +84,12 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
         }
     };
 
-    // Helper to log signals
-    const logSignal = async (format: TabType, interactionType: 'scaffold_click' | 'tab_switch' | 'content_scroll') => {
-        const now = Date.now();
-        const timeSinceLast = now - lastInteraction;
-        setLastInteraction(now);
-
+    // Helper to log signals with dwell time
+    const logSignal = async (
+        format: TabType,
+        interactionType: 'scaffold_click' | 'tab_switch' | 'content_scroll' | 'card_close',
+        dwellTime: number = 0
+    ) => {
         try {
             await fetch(`/api/v1/session/${sessionId}/signal`, {
                 method: 'POST',
@@ -78,8 +97,8 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
                 body: JSON.stringify({
                     concept_id: conceptId,
                     format_chosen: format,
-                    dwell_time_ms: 0,
-                    time_since_last_interaction_ms: timeSinceLast,
+                    dwell_time_ms: dwellTime,
+                    time_since_last_interaction_ms: 0,
                     interaction_type: interactionType
                 })
             });
@@ -88,13 +107,27 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
         }
     };
 
-    // Log signal when tab changes
+    // Log signal when tab changes (with actual dwell time)
     const handleTabClick = (tab: TabType) => {
+        const now = Date.now();
+        const dwellTime = now - tabStartTime;
+
+        // Log PREVIOUS tab's dwell time
+        logSignal(activeTab, 'tab_switch', dwellTime);
+
         setActiveTab(tab);
-        logSignal(tab, 'tab_switch');
+        setTabStartTime(now);
+    };
+
+    // Handle close with final dwell logging
+    const handleClose = () => {
+        const finalDwell = Date.now() - tabStartTime;
+        logSignal(activeTab, 'card_close', finalDwell);
+        onClose();
     };
 
     const activeTabConfig = TABS.find(t => t.id === activeTab);
+
 
     return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -109,7 +142,7 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
                         <p className="text-xs text-slate-400">Explore this concept in different ways</p>
                     </div>
                     <button
-                        onClick={onClose}
+                        onClick={handleClose}
                         className="p-2 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
                     >
                         <X className="w-5 h-5" />
@@ -153,7 +186,7 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
                         <div className="flex flex-col items-center justify-center h-64 text-red-400">
                             <p className="mb-3">{error}</p>
                             <button
-                                onClick={fetchScaffold}
+                                onClick={initConceptCard}
                                 className="px-4 py-2 bg-red-500/20 rounded-lg hover:bg-red-500/30 transition-colors"
                             >
                                 Retry

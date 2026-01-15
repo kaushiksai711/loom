@@ -173,7 +173,7 @@ generative_scaffolding: |
      
      **CRITICAL MERMAID RULES (MUST FOLLOW):**
      - Node labels must be PLAIN TEXT only - no math symbols
-     - FORBIDDEN in labels: ( ) [ ] { } < > | ^ / \ " ' = != 
+     - FORBIDDEN in labels: ( ) [ ] {{ }} < > | ^ / \ " ' = != 
      - Use WORDS instead: "divided by" not "/", "not equal" not "!="
      - Keep labels SHORT (2-4 words max)
      - Use simple edge labels: A --> |relates to| B

@@ -208,11 +208,16 @@ async def get_concept_scaffold(concept_id: str):
     Lazy generation: First request triggers LLM, subsequent requests are cached.
     """
     try:
+        print(f"[Scaffold API] Requested concept_id: {concept_id}")
         scaffold = await rag_service.generate_scaffold(concept_id)
         return scaffold
     except ValueError as e:
+        print(f"[Scaffold API] Concept not found: {e}")
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        import traceback
+        print(f"[Scaffold API] Error: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- Phase 12: Signal Capture (Layer B4) ---
@@ -271,36 +276,103 @@ async def get_signals(session_id: str):
 @router.get("/{session_id}/debrief")
 async def get_session_debrief(session_id: str):
     """
-    Generate session learning debrief with format analytics.
-    Shows: concepts explored, format distribution, preferred format, reflection prompt.
+    Generate comprehensive session learning debrief.
+    
+    Shows:
+    - Chat activity (questions asked, topics explored)
+    - ConceptCard activity (formats used, dwell time)
+    - Confusion indicators (rapid tab switching)
+    - Preferred learning format
+    - Time ranking of concepts
     """
     try:
         arango_db = db.get_db()
         
-        # Get signals
+        # Get all signals
         if not arango_db.has_collection("SessionSignals"):
             signals = []
         else:
-            aql = "FOR s IN SessionSignals FILTER s.session_id == @id RETURN s"
+            aql = "FOR s IN SessionSignals FILTER s.session_id == @id SORT s.created_at ASC RETURN s"
             signals = list(arango_db.aql.execute(aql, bind_vars={"id": session_id}))
         
-        # Aggregate stats
-        format_counts = {"hands_on": 0, "visual": 0, "socratic": 0, "textual": 0}
-        concepts_viewed = set()
-        total_dwell = 0
+        # Separate by signal type
+        chat_signals = [s for s in signals if s.get("signal_type") == "chat_interaction"]
+        card_signals = [s for s in signals if s.get("signal_type") != "chat_interaction"]
         
-        for s in signals:
+        # --- Chat Activity ---
+        chat_concepts = set()
+        for cs in chat_signals:
+            for concept in cs.get("concepts_referenced", []):
+                chat_concepts.add(concept)
+        
+        # --- ConceptCard Activity ---
+        format_counts = {"hands_on": 0, "visual": 0, "socratic": 0, "textual": 0}
+        format_dwell = {"hands_on": 0, "visual": 0, "socratic": 0, "textual": 0}  # Time-weighted
+        concepts_viewed = set()
+        concept_times = {}  # For time ranking
+        
+        for s in card_signals:
             fmt = s.get("format_chosen")
+            concept_id = s.get("concept_id", "unknown")
+            dwell = s.get("dwell_time_ms", 0)
+            
             if fmt in format_counts:
                 format_counts[fmt] += 1
-            concepts_viewed.add(s.get("concept_id"))
-            total_dwell += s.get("dwell_time_ms", 0)
+                format_dwell[fmt] += dwell
+            
+            concepts_viewed.add(concept_id)
+            concept_times[concept_id] = concept_times.get(concept_id, 0) + dwell
         
-        # Find dominant format
-        dominant = max(format_counts, key=format_counts.get) if signals else "textual"
-        total_interactions = sum(format_counts.values())
+        # --- Confusion Detection ---
+        confused_concepts = detect_confusion(card_signals)
         
-        # Generate reflection prompt based on dominant format
+        # --- Calculate Preferred Format (weighted by dwell time) ---
+        if sum(format_dwell.values()) > 0:
+            preferred = max(format_dwell, key=format_dwell.get)
+        elif sum(format_counts.values()) > 0:
+            preferred = max(format_counts, key=format_counts.get)
+        else:
+            preferred = "textual"
+        
+        # --- Time Ranking ---
+        time_ranking = sorted(
+            [{"concept_id": k, "total_time_ms": v} for k, v in concept_times.items()],
+            key=lambda x: x["total_time_ms"],
+            reverse=True
+        )[:10]  # Top 10
+        
+        # --- Lookup Concept Labels ---
+        # Get all concept_ids we need to look up
+        concept_ids_to_lookup = set()
+        for tr in time_ranking:
+            concept_ids_to_lookup.add(tr["concept_id"])
+        for cc in confused_concepts:
+            concept_ids_to_lookup.add(cc["concept_id"])
+        
+        # Batch lookup from Concepts collection
+        concept_labels = {}
+        if concept_ids_to_lookup and arango_db.has_collection("Concepts"):
+            for cid in concept_ids_to_lookup:
+                try:
+                    # Handle both "Concepts/123" and "123" formats
+                    key = cid.split("/")[-1] if "/" in cid else cid
+                    concept = arango_db.collection("Concepts").get(key)
+                    if concept:
+                        concept_labels[cid] = concept.get("label", cid)
+                    else:
+                        concept_labels[cid] = key  # Fallback to key
+                except:
+                    concept_labels[cid] = cid  # Fallback to original
+        
+        # Enrich time_ranking with labels
+        for tr in time_ranking:
+            tr["label"] = concept_labels.get(tr["concept_id"], tr["concept_id"].split("/")[-1])
+        
+        # Enrich confused_concepts with labels
+        for cc in confused_concepts:
+            cc["label"] = concept_labels.get(cc["concept_id"], cc["concept_id"].split("/")[-1])
+        
+        # --- Generate Insights ---
         format_names = {
             "hands_on": "Code examples",
             "visual": "Visual diagrams", 
@@ -308,9 +380,12 @@ async def get_session_debrief(session_id: str):
             "textual": "Text explanations"
         }
         
-        reflection_prompt = f"You explored concepts mostly using {format_names[dominant]}. What made that approach work for you?"
+        total_card_interactions = sum(format_counts.values())
+        total_chat_interactions = len(chat_signals)
+        primary_mode = "chat" if total_chat_interactions > total_card_interactions else "review"
         
-        # Technique suggestion
+        reflection_prompt = f"You explored concepts mostly using {format_names[preferred]}. What made that approach work for you?"
+        
         suggestion_map = {
             "hands_on": "Try the 'Think' tab next session to deepen conceptual understanding.",
             "visual": "Try the 'Code' tab to see practical implementations.",
@@ -320,14 +395,170 @@ async def get_session_debrief(session_id: str):
         
         return {
             "session_id": session_id,
-            "concepts_explored": len(concepts_viewed),
-            "total_interactions": total_interactions,
-            "total_time_ms": total_dwell,
+            
+            # Chat Activity
+            "chat_activity": {
+                "questions_asked": total_chat_interactions,
+                "topics_explored": list(chat_concepts)[:20],  # Limit for response size
+                "total_prompts": total_chat_interactions
+            },
+            
+            # ConceptCard Activity
+            "card_activity": {
+                "concepts_reviewed": len(concepts_viewed),
+                "total_interactions": total_card_interactions,
+                "total_time_ms": sum(format_dwell.values()),
+                "format_distribution": format_counts,
+                "format_time_distribution": format_dwell
+            },
+            
+            # Analytics
+            "preferred_format": preferred,
+            "primary_learning_mode": primary_mode,
+            "confused_concepts": confused_concepts,
+            "concepts_by_time": time_ranking,
+            
+            # Combined legacy fields (for backward compatibility)
+            "concepts_explored": len(concepts_viewed) + len(chat_concepts),
+            "total_interactions": total_card_interactions + total_chat_interactions,
+            "total_time_ms": sum(format_dwell.values()),
             "format_distribution": format_counts,
-            "preferred_format": dominant,
+            
+            # UX
             "reflection_prompt": reflection_prompt,
-            "technique_suggestion": suggestion_map.get(dominant, "Keep exploring different formats!")
+            "technique_suggestion": suggestion_map.get(preferred, "Keep exploring different formats!")
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def detect_confusion(signals: list) -> list:
+    """
+    Detect concepts where user showed confusion patterns.
+    
+    Signals:
+    - Rapid tab switches (3+ in < 10 seconds)
+    - Short dwell times (< 3 seconds)
+    - Viewing all 4 tabs but continuing to switch
+    """
+    from collections import defaultdict
+    
+    by_concept = defaultdict(list)
+    for s in signals:
+        concept_id = s.get("concept_id")
+        if concept_id:
+            by_concept[concept_id].append(s)
+    
+    confused = []
+    
+    for concept_id, concept_signals in by_concept.items():
+        if len(concept_signals) < 2:
+            continue
+        
+        # Count rapid switches
+        rapid_switches = 0
+        short_dwells = 0
+        formats_seen = set()
+        
+        for i, sig in enumerate(concept_signals):
+            dwell = sig.get("dwell_time_ms", 0)
+            fmt = sig.get("format_chosen")
+            
+            if fmt:
+                formats_seen.add(fmt)
+            
+            if dwell < 3000 and dwell > 0:  # < 3 seconds
+                short_dwells += 1
+            
+            # Check time between this and next signal
+            if i < len(concept_signals) - 1:
+                try:
+                    current_time = sig.get("created_at", "")
+                    next_time = concept_signals[i + 1].get("created_at", "")
+                    # Simple check: if both exist and interaction_type is tab_switch
+                    if sig.get("interaction_type") == "tab_switch":
+                        rapid_switches += 1
+                except:
+                    pass
+        
+        # Calculate confusion score
+        total = len(concept_signals)
+        score = (
+            (rapid_switches * 3) +
+            (short_dwells * 2) +
+            (4 if len(formats_seen) >= 4 and total > 5 else 0)  # Viewed all tabs but kept switching
+        ) / max(total, 1)
+        
+        if score > 0.6:
+            confused.append({
+                "concept_id": concept_id,
+                "confusion_score": round(min(score, 1.0), 2),
+                "signals": {
+                    "rapid_switches": rapid_switches,
+                    "short_dwells": short_dwells,
+                    "formats_tried": len(formats_seen)
+                }
+            })
+    
+    return sorted(confused, key=lambda x: x["confusion_score"], reverse=True)[:5]  # Top 5
+
+
+# --- Phase 13: Preference Endpoint ---
+
+@router.get("/{session_id}/preference")
+async def get_format_preference(session_id: str):
+    """
+    Get user's preferred learning format based on signal history.
+    Weighted by dwell time, not just click counts.
+    """
+    try:
+        arango_db = db.get_db()
+        
+        if not arango_db.has_collection("SessionSignals"):
+            return {"preferred_format": "textual", "confidence": "low", "reason": "no_data"}
+        
+        # Get card signals only (chat signals don't have format preference)
+        aql = """
+        FOR s IN SessionSignals 
+            FILTER s.session_id == @id 
+            FILTER s.format_chosen != null
+            RETURN s
+        """
+        signals = list(arango_db.aql.execute(aql, bind_vars={"id": session_id}))
+        
+        if not signals:
+            return {"preferred_format": "textual", "confidence": "low", "reason": "no_card_signals"}
+        
+        # Weight by dwell time
+        format_scores = {"hands_on": 0, "visual": 0, "socratic": 0, "textual": 0}
+        
+        for s in signals:
+            fmt = s.get("format_chosen")
+            dwell = s.get("dwell_time_ms", 1000)  # Default 1s if not tracked
+            
+            if fmt in format_scores:
+                format_scores[fmt] += dwell
+        
+        total = sum(format_scores.values())
+        if total == 0:
+            # Fall back to click counts
+            for s in signals:
+                fmt = s.get("format_chosen")
+                if fmt in format_scores:
+                    format_scores[fmt] += 1
+            total = sum(format_scores.values())
+        
+        preferred = max(format_scores, key=format_scores.get)
+        confidence = "high" if format_scores[preferred] / max(total, 1) > 0.5 else "medium"
+        
+        return {
+            "preferred_format": preferred,
+            "confidence": confidence,
+            "format_scores": format_scores,
+            "total_signals": len(signals)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+

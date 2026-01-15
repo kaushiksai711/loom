@@ -18,6 +18,10 @@ class PromptLoader:
         except Exception as e:
             print(f"CRITICAL: Failed to load prompts from {self.prompts_path}: {e}")
             self._prompts = {}
+    
+    def reload(self):
+        """Hot-reload prompts from disk."""
+        self._load_prompts()
 
     def get(self, key: str, **kwargs) -> str:
         """

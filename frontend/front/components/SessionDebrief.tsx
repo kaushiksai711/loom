@@ -22,6 +22,35 @@ interface DebriefData {
     preferred_format: string;
     reflection_prompt: string;
     technique_suggestion: string;
+    // Phase 13: Enhanced fields
+    chat_activity?: {
+        questions_asked: number;
+        topics_explored: string[];
+        total_prompts: number;
+    };
+    card_activity?: {
+        concepts_reviewed: number;
+        total_interactions: number;
+        total_time_ms: number;
+        format_distribution: Record<string, number>;
+        format_time_distribution: Record<string, number>;
+    };
+    primary_learning_mode?: 'chat' | 'review';
+    confused_concepts?: Array<{
+        concept_id: string;
+        label?: string;
+        confusion_score: number;
+        signals: {
+            rapid_switches: number;
+            short_dwells: number;
+            formats_tried: number;
+        };
+    }>;
+    concepts_by_time?: Array<{
+        concept_id: string;
+        label?: string;
+        total_time_ms: number;
+    }>;
 }
 
 const FORMAT_CONFIG = {
@@ -202,6 +231,74 @@ export default function SessionDebrief({ sessionId, onClose }: SessionDebriefPro
                     />
                 </div>
 
+                {/* Phase 13: Chat Activity Section */}
+                {debrief.chat_activity && debrief.chat_activity.questions_asked > 0 && (
+                    <div className="px-6 pb-6">
+                        <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-lg">
+                            <h4 className="text-emerald-400 font-medium text-sm mb-2 flex items-center gap-2">
+                                💬 Chat Activity
+                            </h4>
+                            <div className="flex gap-4 text-sm">
+                                <div>
+                                    <span className="text-emerald-300 font-bold">{debrief.chat_activity.questions_asked}</span>
+                                    <span className="text-slate-400 ml-1">questions asked</span>
+                                </div>
+                                {debrief.chat_activity.topics_explored.length > 0 && (
+                                    <div className="text-slate-400">
+                                        Topics: {debrief.chat_activity.topics_explored.slice(0, 3).join(', ')}
+                                        {debrief.chat_activity.topics_explored.length > 3 && '...'}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Phase 13: Confusion Indicators */}
+                {debrief.confused_concepts && debrief.confused_concepts.length > 0 && (
+                    <div className="px-6 pb-6">
+                        <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                            <h4 className="text-amber-400 font-medium text-sm mb-2 flex items-center gap-2">
+                                🔄 Concepts to Revisit
+                            </h4>
+                            <p className="text-slate-400 text-sm mb-2">You seemed uncertain about these:</p>
+                            <ul className="space-y-1">
+                                {debrief.confused_concepts.slice(0, 3).map((c) => (
+                                    <li key={c.concept_id} className="text-sm flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                                        <span className="text-amber-200">{c.label || c.concept_id.split('/').pop()}</span>
+                                        <span className="text-slate-500 text-xs">
+                                            ({c.signals.formats_tried} tabs tried)
+                                        </span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    </div>
+                )}
+
+                {/* Phase 13: Time Ranking */}
+                {debrief.concepts_by_time && debrief.concepts_by_time.length > 0 && debrief.concepts_by_time[0].total_time_ms > 0 && (
+                    <div className="px-6 pb-6">
+                        <div className="p-4 bg-slate-800/50 border border-slate-700 rounded-lg">
+                            <h4 className="text-slate-300 font-medium text-sm mb-2 flex items-center gap-2">
+                                ⏱️ Most Time Spent On
+                            </h4>
+                            <ol className="space-y-1">
+                                {debrief.concepts_by_time.slice(0, 5).map((c, i) => (
+                                    <li key={c.concept_id} className="text-sm flex items-center gap-2">
+                                        <span className="text-slate-500 w-4">{i + 1}.</span>
+                                        <span className="text-slate-200">{c.label || c.concept_id.split('/').pop()}</span>
+                                        <span className="text-slate-500 text-xs ml-auto">
+                                            {Math.round(c.total_time_ms / 1000)}s
+                                        </span>
+                                    </li>
+                                ))}
+                            </ol>
+                        </div>
+                    </div>
+                )}
+
                 {/* Tip Section */}
                 <div className="px-6 pb-6">
                     <div className="p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
@@ -227,8 +324,8 @@ export default function SessionDebrief({ sessionId, onClose }: SessionDebriefPro
                         onClick={handleSave}
                         disabled={saving || saved}
                         className={`flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition-all ${saved
-                                ? 'bg-green-500 text-white'
-                                : 'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white shadow-lg shadow-purple-500/20'
+                            ? 'bg-green-500 text-white'
+                            : 'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white shadow-lg shadow-purple-500/20'
                             }`}
                     >
                         {saving ? (

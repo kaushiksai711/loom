@@ -109,8 +109,40 @@ export default function Home() {
 
       const data = await res.json();
 
-      // 1. Update Chat
-      setMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
+      // 1. Update Chat with concept citations
+      const citations = data.context && Array.isArray(data.context)
+        ? data.context
+          .filter((c: any) => c.doc?.label || c.doc?.highlight || c.doc?.source_url)
+          .slice(0, 5)
+          .map((c: any) => {
+            // Derive a meaningful label
+            let label = c.doc?.label;  // Concepts have labels
+            if (!label) {
+              // Seeds: Try to extract from source URL hostname
+              if (c.doc?.source_url) {
+                try {
+                  label = new URL(c.doc.source_url).hostname.replace('www.', '');
+                } catch { label = null; }
+              }
+              // Fallback: First 25 chars of highlight
+              if (!label && c.doc?.highlight) {
+                label = c.doc.highlight.substring(0, 25).trim() + '...';
+              }
+              // Final fallback
+              if (!label) label = 'Source';
+            }
+            return {
+              id: c.doc?._id || c.doc?.label,
+              label: label
+            };
+          })
+        : [];
+
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: data.response,
+        citations: citations
+      }]);
 
       // 2. Update Graph (Avatar Analysis) & State
       if (data.context && Array.isArray(data.context)) {
@@ -290,7 +322,8 @@ export default function Home() {
   // Helper to transform RAG context into Graph Data
   const updateGraphFromContext = (contextItems: any[]) => {
     setGraphData(prev => {
-      const nodeMap = new Map(prev.nodes.map(n => [n.id, { ...n }]));
+      // IMPORTANT: Keep original node references to preserve x, y, fx, fy positions
+      const nodeMap = new Map(prev.nodes.map(n => [n.id, n]));
       const newLinks = [...prev.links];
 
       contextItems.forEach((item: any) => {
@@ -310,15 +343,13 @@ export default function Home() {
         const sourceText = doc.highlight || doc.text || doc.definition || JSON.stringify(doc, null, 2);
 
         if (nodeMap.has(id)) {
-          // MERGE: Update existing node
+          // MERGE: Update existing node IN PLACE to preserve x, y, fx, fy positions
           const existing = nodeMap.get(id);
-          nodeMap.set(id, {
-            ...existing,
-            status: item.edge_type === 'CONTRADICTS' ? 'conflict' : existing.status,
-            sourceText: sourceText,
-            citation: citation,
-            val: (existing.val || 5) + 3 // Highlight effect: grow slightly
-          });
+          // Mutate in place - don't spread to new object, this preserves force-graph positions
+          existing.status = item.edge_type === 'CONTRADICTS' ? 'conflict' : existing.status;
+          existing.sourceText = sourceText;
+          existing.citation = citation;
+          existing.val = (existing.val || 5) + 3; // Highlight effect: grow slightly
         } else {
           // CREATE: New Node
           nodeMap.set(id, {
@@ -476,6 +507,13 @@ export default function Home() {
             isLoading={isLoading}
             onEndSession={handleEndSession}
             isCrystallized={isCrystallized}
+            onConceptClick={(conceptId, label) => {
+              // Find the node in the graph and focus it
+              const node = graphData.nodes.find(n => n.id === label || n.id === conceptId);
+              if (node) {
+                setSelectedNode(node);
+              }
+            }}
           />
         </div>
 

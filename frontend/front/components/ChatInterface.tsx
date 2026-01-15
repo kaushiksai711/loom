@@ -3,9 +3,15 @@ import { Send, AlertTriangle, BookOpen, Search } from 'lucide-react';
 
 export type ChatIntent = 'GENERAL' | 'FACT_CHECK' | 'LEARNING';
 
+interface Citation {
+    id: string;
+    label: string;
+}
+
 interface Message {
     role: 'user' | 'assistant';
     content: string;
+    citations?: Citation[];
 }
 
 interface ChatInterfaceProps {
@@ -14,9 +20,10 @@ interface ChatInterfaceProps {
     isLoading: boolean;
     onEndSession: () => void;
     isCrystallized: boolean;
+    onConceptClick?: (conceptId: string, label: string) => void;
 }
 
-const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMessage, isLoading, onEndSession, isCrystallized }) => {
+const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMessage, isLoading, onEndSession, isCrystallized, onConceptClick }) => {
     const [message, setMessage] = useState('');
     const [intent, setIntent] = useState<ChatIntent>('GENERAL');
     const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -93,13 +100,28 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMessage, 
                     </div>
                 ) : (
                     messages.map((msg, idx) => (
-                        <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                             <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${msg.role === 'user'
-                                    ? 'bg-zinc-700 text-white rounded-br-none'
-                                    : 'bg-zinc-800/80 text-zinc-200 border border-white/5 rounded-bl-none'
+                                ? 'bg-zinc-700 text-white rounded-br-none'
+                                : 'bg-zinc-800/80 text-zinc-200 border border-white/5 rounded-bl-none'
                                 }`}>
                                 {msg.content}
                             </div>
+                            {/* Citation Links */}
+                            {msg.role === 'assistant' && msg.citations && msg.citations.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 mt-2 max-w-[85%]">
+                                    <span className="text-xs text-zinc-500">Related:</span>
+                                    {msg.citations.map((citation, cidx) => (
+                                        <button
+                                            key={cidx}
+                                            onClick={() => onConceptClick?.(citation.id, citation.label)}
+                                            className="text-xs px-2 py-0.5 bg-teal-900/30 text-teal-400 rounded hover:bg-teal-900/50 border border-teal-500/20 transition-colors"
+                                        >
+                                            {citation.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     ))
                 )}
