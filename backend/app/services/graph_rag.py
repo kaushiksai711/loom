@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 from fastembed import TextEmbedding
 from backend.app.db.arango import db
 import datetime
@@ -9,17 +9,93 @@ from backend.app.core.prompts import prompts
 from langchain_core.messages import HumanMessage, SystemMessage
 from backend.app.core.rate_limiter import global_limiter
 from fuzzywuzzy import fuzz
+
+# Lazy load reranker to avoid slow startup
+_reranker_model = None
+
+def get_reranker():
+    """Lazy load the cross-encoder reranker model."""
+    global _reranker_model
+    if _reranker_model is None:
+        try:
+            from sentence_transformers import CrossEncoder
+            # ms-marco-MiniLM is fast and effective for reranking
+            _reranker_model = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', max_length=512)
+            print("[Phase 14] Reranker loaded: cross-encoder/ms-marco-MiniLM-L-6-v2")
+        except Exception as e:
+            print(f"[Phase 14] Reranker not available: {e}")
+            _reranker_model = False  # Mark as unavailable
+    return _reranker_model if _reranker_model else None
+
+
 class GraphRAGService:
     def __init__(self):
-        # Initialize FastEmbed (Lightweight, High Quality, Local)
-        # using 'BAAI/bge-small-en-v1.5' for excellent retrieval performance
-        self.embedding_model = TextEmbedding("BAAI/bge-small-en-v1.5")
+        # Initialize FastEmbed for embeddings (bge-small for compatibility with existing DB)
+        # Note: BGE-M3 (1024 dims) can be used for new deployments, but requires re-embedding
+        self.embedding_model = TextEmbedding("BAAI/bge-small-en-v1.5")  # 384 dims
         self.db = db.get_db()
+        
+        # Reranker config
+        self.RERANK_ENABLED = True
+        self.RERANK_TOP_K = 20  # Retrieve more, then rerank
+        self.RERANK_FINAL_K = 10  # Return top after reranking
 
     def embed_query(self, text: str) -> List[float]:
-        """Generate embedding for text."""
+        """Generate embedding for text using FastEmbed."""
         # FastEmbed returns a generator, consume it
         return list(self.embedding_model.embed([text]))[0]
+    
+    def rerank_results(self, query: str, results: List[Dict], top_k: int = 10) -> List[Dict]:
+        """
+        Phase 14: Rerank results using cross-encoder for better precision.
+        
+        Args:
+            query: Original user query
+            results: List of retrieved results (concepts/seeds)
+            top_k: Number of top results to return after reranking
+            
+        Returns:
+            Reranked list of results
+        """
+        if not results or not self.RERANK_ENABLED:
+            return results[:top_k]
+        
+        reranker = get_reranker()
+        if not reranker:
+            return results[:top_k]
+        
+        try:
+            # Prepare query-document pairs for cross-encoder
+            pairs = []
+            for r in results:
+                # Extract text from concept or seed
+                if 'concept' in r:
+                    doc_text = f"{r['concept'].get('label', '')} {r['concept'].get('definition', '')}"
+                elif 'seed' in r:
+                    doc_text = r['seed'].get('highlight', '') or r['seed'].get('content', '')
+                elif 'doc' in r:
+                    doc_text = r['doc'].get('highlight', '') or r['doc'].get('content', '')
+                else:
+                    doc_text = str(r)
+                
+                pairs.append((query, doc_text[:500]))  # Truncate for speed
+            
+            # Get reranking scores
+            scores = reranker.predict(pairs)
+            
+            # Attach rerank scores and sort
+            for i, r in enumerate(results):
+                r['rerank_score'] = float(scores[i])
+            
+            # Sort by rerank score (higher = more relevant)
+            reranked = sorted(results, key=lambda x: x.get('rerank_score', 0), reverse=True)
+            
+            print(f"[Phase 14] Reranked {len(results)} results -> top {top_k}")
+            return reranked[:top_k]
+            
+        except Exception as e:
+            print(f"[Phase 14] Reranking failed: {e}")
+            return results[:top_k]
 
     async def create_session(self, title: str, goal: str) -> str:
         """
@@ -2082,3 +2158,418 @@ class GraphRAGService:
             print(f"Layout Computation Failed: {e}")
             
         return data
+
+    # ==========================================================================
+    # PHASE 14: HYBRID RAG PIPELINE
+    # ==========================================================================
+    
+    # Priority weights for different context sources
+    PRIORITY_WEIGHTS = {
+        "session_seeds": 1.0,      # Current session focus
+        "concept_vector": 0.9,     # Crystallized knowledge
+        "graph_expansion": 0.7,    # Related but indirect
+        "global_seeds": 0.5,       # Fallback evidence
+    }
+    
+    # Thresholds for pipeline decisions
+    SPARSE_THRESHOLD = 2           # Triggers fallback search
+    QUALITY_THRESHOLD = 0.4        # Minimum context quality score
+    GAP_SCORE_THRESHOLD = 0.85     # Flags potential missed concepts
+    
+    # Adaptive similarity thresholds (base values)
+    BASE_CONCEPT_THRESHOLD = 0.55  # More permissive to not miss existing concepts
+    STRICT_CONCEPT_THRESHOLD = 0.7 # For global-only queries
+    COHERENCE_THRESHOLD = 0.65     # Min score for primary concept to avoid hallucinated coherence
+    
+    async def search_concepts(self, query_embedding: List[float], limit: int = 5, session_id: str = None) -> List[Dict]:
+        """
+        Phase 14: Vector search on Concepts collection.
+        Returns crystallized knowledge that matches the query.
+        
+        Optionally filters by session via ConceptSessionLinks.
+        """
+        # If session_id provided, prioritize session concepts first
+        if session_id:
+            aql = """
+            // Session-specific concepts first
+            LET session_concepts = (
+                FOR link IN ConceptSessionLinks
+                    FILTER link._to == CONCAT('Sessions/', @session_id)
+                    LET concept = DOCUMENT(link._from)
+                    FILTER concept != null AND concept.embedding != null
+                    LET score = COSINE_SIMILARITY(concept.embedding, @embedding)
+                    FILTER score > 0.55
+                    SORT score DESC
+                    LIMIT @limit
+                    RETURN { concept: concept, score: score, source: 'session_concept' }
+            )
+            
+            // Global concepts if session concepts sparse
+            LET global_concepts = (
+                FOR doc IN Concepts
+                    FILTER doc.embedding != null
+                    // Include concepts with type null, 'concept', or 'sub_concept' (exclude 'source')
+                    FILTER doc.type != 'source'
+                    LET score = COSINE_SIMILARITY(doc.embedding, @embedding)
+                    FILTER score > 0.6
+                    SORT score DESC
+                    LIMIT @limit
+                    RETURN { concept: doc, score: score, source: 'global_concept' }
+            )
+            
+            // Merge - session first, then fill with global
+            LET merged = UNION(session_concepts, global_concepts)
+            FOR item IN merged
+                COLLECT concept_id = item.concept._id INTO group
+                LET best = FIRST(group[*].item)
+                SORT best.score DESC
+                LIMIT @limit
+                RETURN best
+            """
+        else:
+            # Global search only
+            aql = """
+            FOR doc IN Concepts
+                FILTER doc.embedding != null
+                // Include concepts with type null, 'concept', or 'sub_concept' (exclude 'source')
+                FILTER doc.type != 'source'
+                LET score = COSINE_SIMILARITY(doc.embedding, @embedding)
+                FILTER score > 0.5
+                SORT score DESC
+                LIMIT @limit
+                RETURN { concept: doc, score: score, source: 'global_concept' }
+            """
+        
+        try:
+            # Build bind_vars based on which branch was taken
+            bind_vars = {
+                "embedding": query_embedding,
+                "limit": limit,
+            }
+            if session_id:
+                bind_vars["session_id"] = session_id
+            
+            cursor = self.db.aql.execute(aql, bind_vars=bind_vars)
+            results = list(cursor)
+            print(f"[Phase 14] search_concepts: Found {len(results)} concepts")
+            return results
+        except Exception as e:
+            print(f"[Phase 14] search_concepts error: {e}")
+            return []
+    
+    async def expand_graph(self, concept_ids: List[str], hops: int = 1, limit: int = 10) -> List[Dict]:
+        """
+        Phase 14: Graph traversal from concept nodes.
+        Returns related concepts within N hops with score decay.
+        
+        Args:
+            concept_ids: Starting concept IDs for traversal
+            hops: Max traversal depth (default 2 for transitive insights)
+            limit: Max results to return
+            
+        Score decay: 1st hop = 1.0×, 2nd hop = 0.5× (prevents noise from distant nodes)
+        """
+        if not concept_ids:
+            return []
+        
+        aql = """
+        FOR start_id IN @concept_ids
+            LET start_node = DOCUMENT(start_id)
+            FILTER start_node != null
+            FOR v, e, p IN 1..@hops ANY start_node GRAPH 'concept_graph'
+                // Filter to only meaningful concept relationships
+                FILTER v.type IN ['concept', 'sub_concept', 'source'] OR v.type == null
+                // Calculate hop distance for decay
+                LET hop_distance = LENGTH(p.edges)
+                // Edge type weights
+                LET edge_weight = (
+                    e.type IN ['CAUSES', 'REQUIRES', 'ENABLES', 'HAS_PART', 'PREREQUISITE'] ? 1.0 :
+                    e.type IN ['RELATED_TO', 'MENTIONS'] ? 0.6 :
+                    e.type == 'CONTRADICTS' ? 0.8 :
+                    0.5
+                )
+                // Apply hop decay: 1st hop = 1.0, 2nd hop = 0.5
+                LET hop_decay = hop_distance == 1 ? 1.0 : 0.5
+                LET final_weight = edge_weight * hop_decay
+                
+                COLLECT node_id = v._id INTO groups
+                LET node = FIRST(groups[*].v)
+                LET max_weight = MAX(groups[*].final_weight)
+                LET edge_types = UNIQUE(groups[*].e.type)
+                LET min_hops = MIN(groups[*].hop_distance)
+                SORT max_weight DESC
+                LIMIT @limit
+                RETURN { 
+                    concept: node, 
+                    score: max_weight * 0.7,  // Apply graph expansion priority weight
+                    edge_types: edge_types,
+                    source: 'graph_expansion',
+                    hops: min_hops
+                }
+        """
+        
+        try:
+            cursor = self.db.aql.execute(aql, bind_vars={
+                "concept_ids": concept_ids,
+                "hops": hops,
+                "limit": limit
+            })
+            results = list(cursor)
+            # Flatten if nested
+            if results and isinstance(results[0], list):
+                results = [item for sublist in results for item in sublist]
+            print(f"[Phase 14] expand_graph: Found {len(results)} related concepts from {len(concept_ids)} seeds")
+            return results
+        except Exception as e:
+            print(f"[Phase 14] expand_graph error: {e}")
+            return []
+    
+    async def search_global_seeds(self, query_embedding: List[float], limit: int = 5, exclude_session: str = None) -> List[Dict]:
+        """
+        Phase 14: Global seed search (fallback).
+        Searches all Seeds without session filter.
+        Optionally excludes a specific session.
+        """
+        aql = """
+        FOR doc IN Seeds
+            FILTER doc.embedding != null
+            FILTER @exclude_session == null OR doc.session_id != @exclude_session
+            LET score = COSINE_SIMILARITY(doc.embedding, @embedding)
+            FILTER score > 0.6
+            SORT score DESC
+            LIMIT @limit
+            RETURN { 
+                seed: doc, 
+                score: score * 0.5,  // Apply global seeds weight
+                source: 'global_seeds' 
+            }
+        """
+        
+        try:
+            cursor = self.db.aql.execute(aql, bind_vars={
+                "embedding": query_embedding,
+                "limit": limit,
+                "exclude_session": exclude_session
+            })
+            results = list(cursor)
+            print(f"[Phase 14] search_global_seeds: Found {len(results)} global seeds")
+            return results
+        except Exception as e:
+            print(f"[Phase 14] search_global_seeds error: {e}")
+            return []
+    
+    def calculate_context_quality(self, results: List[Dict]) -> float:
+        """
+        Phase 14: Calculate overall context quality score.
+        Based on: number of results, score distribution, source diversity.
+        """
+        if not results:
+            return 0.0
+        
+        # Factor 1: Number of results (more is better, up to a point)
+        count_score = min(len(results) / 5, 1.0)  # Max at 5 results
+        
+        # Factor 2: Average score of top results
+        scores = []
+        for r in results:
+            if 'score' in r:
+                scores.append(r['score'])
+            elif 'concept' in r and isinstance(r['concept'], dict):
+                scores.append(r.get('score', 0))
+        
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+        
+        # Factor 3: Source diversity (bonus for multiple source types)
+        sources = set()
+        for r in results:
+            sources.add(r.get('source', 'unknown'))
+        diversity_bonus = min(len(sources) / 3, 0.3)  # Up to 0.3 bonus
+        
+        # Combined quality
+        quality = (count_score * 0.3) + (avg_score * 0.5) + diversity_bonus
+        
+        print(f"[Phase 14] Context Quality: {quality:.3f} (count: {count_score:.2f}, avg: {avg_score:.2f}, diversity: {diversity_bonus:.2f})")
+        return min(quality, 1.0)
+    
+    def detect_missed_concepts(self, session_seeds: List[Dict], concepts: List[Dict]) -> List[Dict]:
+        """
+        Phase 14: Gap Detection.
+        Find high-score seeds that don't have matching concepts.
+        These indicate potential knowledge that hasn't been crystallized.
+        """
+        missed = []
+        
+        # Get concept labels for comparison
+        concept_labels = set()
+        for c in concepts:
+            if 'concept' in c and isinstance(c['concept'], dict):
+                label = c['concept'].get('label', '').lower()
+                if label:
+                    concept_labels.add(label)
+        
+        for seed in session_seeds:
+            score = seed.get('score', 0)
+            if score >= self.GAP_SCORE_THRESHOLD:
+                # High relevance seed - check if concept exists
+                seed_doc = seed.get('doc', {})
+                seed_text = seed_doc.get('highlight', '')[:100] if seed_doc else ''
+                
+                # Simple heuristic: if no concept label appears in seed, it might be a gap
+                has_match = False
+                for label in concept_labels:
+                    if label in seed_text.lower():
+                        has_match = True
+                        break
+                
+                if not has_match and seed_text:
+                    missed.append({
+                        "seed_id": seed_doc.get('_id', 'unknown'),
+                        "seed_text": seed_text,
+                        "score": score,
+                        "source": seed_doc.get('source', 'Unknown'),
+                        "suggestion": "This evidence might contain concepts not yet crystallized"
+                    })
+        
+        print(f"[Phase 14] Gap Detection: Found {len(missed)} potential missed concepts")
+        return missed[:3]  # Limit to top 3 gaps
+    
+    async def hybrid_retrieve(self, query: str, session_id: str = None) -> Dict:
+        """
+        Phase 14: Orchestrator for multi-step hybrid RAG.
+        
+        Pipeline:
+        1. Session Seeds (current session evidence)
+        2a. Concept Vector Search (crystallized knowledge)
+        2b. Graph Expansion (related concepts)
+        3. Global Seeds Fallback (if sparse)
+        4. Aggregate & Score
+        
+        Returns:
+            {
+                "results": [...],          # Combined context items
+                "concepts": [...],         # Concepts found
+                "seeds": [...],            # Seeds found
+                "context_quality": float,  # 0-1 quality score
+                "is_new_territory": bool,  # True if unknown topic
+                "missed_concepts": [...],  # Gap detection flags
+                "territory": "known" | "new"
+            }
+        """
+        print(f"\n[Phase 14] ===== HYBRID RETRIEVE START =====")
+        print(f"[Phase 14] Query: '{query[:50]}...' | Session: {session_id}")
+        
+        # Generate embedding once
+        query_embedding = self.embed_query(query).tolist()
+        
+        all_results = []
+        concepts_found = []
+        seeds_found = []
+        
+        # ===== STEP 1: Session Seeds =====
+        if session_id:
+            session_seeds = await self.hybrid_search(
+                query=query,
+                session_id=session_id,
+                intent="GENERAL",
+                top_k=5,
+                allow_global_fallback=False
+            )
+            for item in session_seeds:
+                item['source'] = 'session_seeds'
+                item['priority'] = self.PRIORITY_WEIGHTS['session_seeds']
+            seeds_found.extend(session_seeds)
+            all_results.extend(session_seeds)
+            print(f"[Phase 14] Step 1 - Session Seeds: {len(session_seeds)} results")
+        else:
+            session_seeds = []
+        
+        # ===== STEP 2a: Concept Vector Search =====
+        concept_results = await self.search_concepts(query_embedding, limit=5, session_id=session_id)
+        for item in concept_results:
+            item['priority'] = self.PRIORITY_WEIGHTS['concept_vector']
+        concepts_found.extend(concept_results)
+        all_results.extend(concept_results)
+        print(f"[Phase 14] Step 2a - Concept Search: {len(concept_results)} results")
+        
+        # ===== STEP 2b: Graph Expansion =====
+        if concept_results:
+            concept_ids = [r['concept']['_id'] for r in concept_results if 'concept' in r and '_id' in r.get('concept', {})]
+            if concept_ids:
+                expanded = await self.expand_graph(concept_ids, hops=2, limit=5)  # 2-hop for transitive insights
+                for item in expanded:
+                    item['priority'] = self.PRIORITY_WEIGHTS['graph_expansion']
+                concepts_found.extend(expanded)
+                all_results.extend(expanded)
+                print(f"[Phase 14] Step 2b - Graph Expansion: {len(expanded)} results")
+        
+        # ===== STEP 3: Global Seeds Fallback =====
+        total_so_far = len(all_results)
+        if total_so_far < self.SPARSE_THRESHOLD:
+            print(f"[Phase 14] Step 3 - Sparse context ({total_so_far} results), triggering global fallback")
+            global_seeds = await self.search_global_seeds(query_embedding, limit=5, exclude_session=session_id)
+            for item in global_seeds:
+                item['priority'] = self.PRIORITY_WEIGHTS['global_seeds']
+            seeds_found.extend([{'doc': item.get('seed', {}), 'score': item['score'], 'source': 'global_seeds'} for item in global_seeds])
+            all_results.extend(global_seeds)
+            print(f"[Phase 14] Step 3 - Global Seeds: {len(global_seeds)} results")
+        
+        # ===== STEP 4: Aggregate & Score =====
+        context_quality = self.calculate_context_quality(all_results)
+        
+        # ===== STEP 5: Gap Detection =====
+        missed_concepts = self.detect_missed_concepts(seeds_found, concepts_found)
+        
+        # ===== STEP 5.5: Enhanced Territory Detection (Max Score Based) =====
+        # Get max score from primary concepts (not graph expansion)
+        primary_concept_scores = [r.get('score', 0) for r in concept_results if r.get('source') in ['session_concept', 'global_concept']]
+        max_primary_score = max(primary_concept_scores) if primary_concept_scores else 0
+        
+        # Territory Thresholds:
+        # - "known": At least one strong concept match (>= 0.75)
+        # - "uncertain": Weak matches exist (0.5 - 0.75) - LLM evaluates relevance
+        # - "new": No meaningful matches (< 0.5 or no concepts)
+        
+        STRONG_MATCH_THRESHOLD = 0.75  # Strong semantic match = definitely relevant
+        WEAK_MATCH_THRESHOLD = 0.5     # Below this = new territory
+        
+        if max_primary_score >= STRONG_MATCH_THRESHOLD:
+            territory = "known"
+            is_new_territory = False
+        elif max_primary_score >= WEAK_MATCH_THRESHOLD:
+            territory = "uncertain"  # Weak matches - LLM decides relevance
+            is_new_territory = False  # Not definitely new, but uncertain
+        else:
+            territory = "new"
+            is_new_territory = True
+        
+        print(f"[Phase 14] Territory detection: max_score={max_primary_score:.2f} -> {territory}")
+        
+        print(f"[Phase 14] ===== HYBRID RETRIEVE COMPLETE =====")
+        print(f"[Phase 14] Total Results: {len(all_results)} | Quality: {context_quality:.2f} | Territory: {territory}")
+        print(f"[Phase 14] Concepts: {len(concepts_found)} | Seeds: {len(seeds_found)} | Gaps: {len(missed_concepts)}")
+        
+        # Sort by priority-weighted score
+        def sort_key(item):
+            base_score = item.get('score', 0)
+            priority = item.get('priority', 0.5)
+            return base_score * priority
+        
+        all_results.sort(key=sort_key, reverse=True)
+        
+        # ===== STEP 6: Rerank with Cross-Encoder (Phase 14 Enhancement) =====
+        if self.RERANK_ENABLED and len(all_results) > 3:
+            # Rerank all results using cross-encoder for better precision
+            all_results = self.rerank_results(query, all_results, top_k=self.RERANK_FINAL_K)
+            # Also rerank concepts separately for citations
+            if concepts_found:
+                concepts_found = self.rerank_results(query, concepts_found, top_k=5)
+        
+        return {
+            "results": all_results[:10],  # Top 10 combined
+            "concepts": concepts_found,
+            "seeds": seeds_found,
+            "context_quality": context_quality,
+            "is_new_territory": is_new_territory,
+            "territory": territory,
+            "missed_concepts": missed_concepts
+        }

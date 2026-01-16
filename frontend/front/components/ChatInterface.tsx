@@ -1,17 +1,21 @@
 import React, { useState } from 'react';
-import { Send, AlertTriangle, BookOpen, Search } from 'lucide-react';
+import { Send, AlertTriangle, BookOpen, Search, Compass, Lightbulb } from 'lucide-react';
 
 export type ChatIntent = 'GENERAL' | 'FACT_CHECK' | 'LEARNING';
 
 interface Citation {
     id: string;
     label: string;
+    type?: 'concept' | 'evidence';  // Phase 14: Distinguish citation types
 }
 
 interface Message {
     role: 'user' | 'assistant';
     content: string;
     citations?: Citation[];
+    territory?: 'known' | 'uncertain' | 'new';  // Phase 14: Territory detection
+    contextQuality?: number;              // Phase 14: Quality score
+    isGrounded?: boolean;                 // Phase 14: Grounded response flag
 }
 
 interface ChatInterfaceProps {
@@ -92,7 +96,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMessage, 
                 )}
             </div>
 
-            {/* Chat Stream (Placeholder for now, usually fed by parent) */}
+            {/* Chat Stream */}
             <div className="flex-1 p-4 overflow-y-auto space-y-4" ref={scrollRef}>
                 {messages.length === 0 ? (
                     <div className="text-center text-zinc-600 text-sm mt-10">
@@ -101,27 +105,100 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ messages, onSendMessage, 
                 ) : (
                     messages.map((msg, idx) => (
                         <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                            <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${msg.role === 'user'
+                            {/* Phase 14: Territory Banners */}
+                            {msg.role === 'assistant' && msg.territory === 'new' && (
+                                <div className="mb-2 max-w-[85%] flex items-center gap-2 px-3 py-1.5 bg-amber-900/30 border border-amber-500/30 rounded-lg">
+                                    <Compass size={14} className="text-amber-400" />
+                                    <span className="text-xs text-amber-300 font-medium">New Territory - Topic not in knowledge base</span>
+                                </div>
+                            )}
+                            {msg.role === 'assistant' && msg.territory === 'uncertain' && (
+                                <div className="mb-2 max-w-[85%] flex items-center gap-2 px-3 py-1.5 bg-yellow-900/20 border border-yellow-500/20 rounded-lg">
+                                    <AlertTriangle size={14} className="text-yellow-400" />
+                                    <span className="text-xs text-yellow-300 font-medium">Uncertain Match - Weak relevance detected</span>
+                                </div>
+                            )}
+
+                            {/* Message Bubble */}
+                            <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm relative ${msg.role === 'user'
                                 ? 'bg-zinc-700 text-white rounded-br-none'
                                 : 'bg-zinc-800/80 text-zinc-200 border border-white/5 rounded-bl-none'
                                 }`}>
                                 {msg.content}
+
+                                {/* Phase 14: Grounded indicator */}
+                                {msg.role === 'assistant' && msg.isGrounded !== undefined && (
+                                    <div className="absolute -top-2 -right-2">
+                                        {msg.isGrounded ? (
+                                            <div className="w-4 h-4 bg-teal-500/20 rounded-full flex items-center justify-center" title="Grounded in your knowledge">
+                                                <div className="w-2 h-2 bg-teal-400 rounded-full" />
+                                            </div>
+                                        ) : (
+                                            <div className="w-4 h-4 bg-amber-500/20 rounded-full flex items-center justify-center" title="General knowledge response">
+                                                <div className="w-2 h-2 bg-amber-400 rounded-full" />
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
-                            {/* Citation Links */}
+
+                            {/* Phase 14: Citation Links with type distinction */}
                             {msg.role === 'assistant' && msg.citations && msg.citations.length > 0 && (
                                 <div className="flex flex-wrap gap-1.5 mt-2 max-w-[85%]">
-                                    <span className="text-xs text-zinc-500">Related:</span>
-                                    {msg.citations.map((citation, cidx) => (
-                                        <button
-                                            key={cidx}
-                                            onClick={() => onConceptClick?.(citation.id, citation.label)}
-                                            className="text-xs px-2 py-0.5 bg-teal-900/30 text-teal-400 rounded hover:bg-teal-900/50 border border-teal-500/20 transition-colors"
-                                        >
-                                            {citation.label}
-                                        </button>
-                                    ))}
+                                    {/* Concept Citations */}
+                                    {msg.citations.filter(c => c.type === 'concept').length > 0 && (
+                                        <>
+                                            <span className="text-xs text-teal-500 flex items-center gap-1">
+                                                <Lightbulb size={10} /> Concepts:
+                                            </span>
+                                            {msg.citations.filter(c => c.type === 'concept').map((citation, cidx) => (
+                                                <button
+                                                    key={`concept-${cidx}`}
+                                                    onClick={() => onConceptClick?.(citation.id, citation.label)}
+                                                    className="text-xs px-2 py-0.5 bg-teal-900/30 text-teal-400 rounded hover:bg-teal-900/50 border border-teal-500/20 transition-colors font-medium"
+                                                >
+                                                    {citation.label}
+                                                </button>
+                                            ))}
+                                        </>
+                                    )}
+
+                                    {/* Evidence Citations */}
+                                    {msg.citations.filter(c => c.type === 'evidence' || !c.type).length > 0 && (
+                                        <>
+                                            <span className="text-xs text-blue-500 flex items-center gap-1 ml-2">
+                                                Evidence:
+                                            </span>
+                                            {msg.citations.filter(c => c.type === 'evidence' || !c.type).map((citation, cidx) => (
+                                                <button
+                                                    key={`evidence-${cidx}`}
+                                                    onClick={() => onConceptClick?.(citation.id, citation.label)}
+                                                    className="text-xs px-2 py-0.5 bg-blue-900/20 text-blue-400 rounded hover:bg-blue-900/40 border border-blue-500/20 transition-colors"
+                                                >
+                                                    {citation.label}
+                                                </button>
+                                            ))}
+                                        </>
+                                    )}
                                 </div>
                             )}
+
+                            {/* Legacy: Fallback for old citation format */}
+                            {msg.role === 'assistant' && msg.citations && msg.citations.length > 0 &&
+                                !msg.citations.some(c => c.type) && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2 max-w-[85%]">
+                                        <span className="text-xs text-zinc-500">Related:</span>
+                                        {msg.citations.map((citation, cidx) => (
+                                            <button
+                                                key={cidx}
+                                                onClick={() => onConceptClick?.(citation.id, citation.label)}
+                                                className="text-xs px-2 py-0.5 bg-teal-900/30 text-teal-400 rounded hover:bg-teal-900/50 border border-teal-500/20 transition-colors"
+                                            >
+                                                {citation.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
                         </div>
                     ))
                 )}

@@ -23,76 +23,141 @@ class ChatRequest(BaseModel):
 @router.post("")
 async def chat_session(request: ChatRequest):
     """
-    Chat with the Session Knowledge (Seeds + Ingested Docs).
-    Uses Hybrid RAG.
+    Phase 14: Chat with Hybrid RAG.
+    Uses multi-step retrieval: Session Seeds -> Concepts -> Graph Expansion -> Global Fallback.
     """
     try:
         import asyncio
         import json
 
-        # 1. Retrieve Context (Parallel Execution)
-        # Task A: Session Context (High Priority, Strict)
-        # We want this to definitely finish, as it's the immediate conversation memory.
-        session_task = rag_service.hybrid_search(
-            query=request.message, 
-            session_id=request.session_id, 
-            intent=request.intent,
-            top_k=5,
-            allow_global_fallback=False # Strict Session Scope
+        # ===== PHASE 14: Use Hybrid Retrieve =====
+        rag_result = await rag_service.hybrid_retrieve(
+            query=request.message,
+            session_id=request.session_id
         )
-
-        # Task B: Global Scout (Background Wisdom)
-        # Search everything (session_id=None) but with a strict timeout.
-        global_task = rag_service.hybrid_search(
-            query=request.message, 
-            session_id=None, 
-            intent=request.intent,
-            top_k=3
-        )
-
-        # Execute
-        context_result = await session_task
         
-        try:
-            # "Global Scout" - 800ms Timeout
-            global_result = await asyncio.wait_for(global_task, timeout=0.8)
-            
-            # Merge & Dedup
-            seen_ids = {item['doc']['_id'] for item in context_result if 'doc' in item}
-            for item in global_result:
-                if 'doc' in item and item['doc'].get('_id') not in seen_ids:
-                    context_result.append(item)
-                    print(f"[Global Scout] Found relevant insight: {item['doc'].get('label', 'Unknown')}")
-                    
-        except asyncio.TimeoutError:
-            print("[Global Scout] Search timed out (latency protection active).")
-        except Exception as e:
-            print(f"[Global Scout] Failed: {e}")
+        # Extract components from hybrid result
+        all_results = rag_result.get("results", [])
+        concepts_found = rag_result.get("concepts", [])
+        seeds_found = rag_result.get("seeds", [])
+        context_quality = rag_result.get("context_quality", 0)
+        is_new_territory = rag_result.get("is_new_territory", False)
+        territory = rag_result.get("territory", "known")
+        missed_concepts = rag_result.get("missed_concepts", [])
         
-        # Format context (Structured JSON for LLM)
-        # Filter down to essential fields to save tokens
+        # ===== Format Context for LLM =====
+        # Include both Concepts (crystallized knowledge) and Seeds (raw evidence)
         clean_context = []
-        for item in context_result:
-            if 'doc' not in item: continue
+        concept_citations = []
+        seed_citations = []
+        
+        # Process Concepts
+        for item in concepts_found:
+            concept = item.get('concept', {})
+            if not concept:
+                continue
+            label = concept.get('label', concept.get('name', 'Unknown'))
+            definition = concept.get('definition', '')
+            concept_id = concept.get('_id', 'unknown')
+            score = item.get('score', 0)
+            source_type = item.get('source', 'concept')
+            
             clean_context.append({
-                "label": item['doc'].get('label', item['doc'].get('highlight', '')[:50]),
-                "content": item['doc'].get('highlight') or item['doc'].get('text', ''),
-                "source": item['doc'].get('source', 'Unknown'),
-                "score": round(item['score'], 2),
-                "type": item.get('edge_type', 'similarity')
+                "type": "concept",
+                "label": label,
+                "definition": definition[:500] if definition else "",
+                "id": concept_id,
+                "score": round(score, 2),
+                "source_type": source_type
             })
-
+            
+            concept_citations.append({
+                "id": concept_id,
+                "label": label,
+                "type": source_type
+            })
+        
+        # Process Seeds (Evidence)
+        for item in seeds_found[:5]:  # Limit seeds in context
+            doc = item.get('doc', {})
+            if not doc:
+                continue
+            highlight = doc.get('highlight', doc.get('text', ''))
+            source = doc.get('source', 'Unknown')
+            seed_id = doc.get('_id', 'unknown')
+            score = item.get('score', 0)
+            
+            clean_context.append({
+                "type": "evidence",
+                "content": highlight[:400] if highlight else "",
+                "source": source,
+                "id": seed_id,
+                "score": round(score, 2),
+                "source_type": item.get('source', 'seed')
+            })
+            
+            # Only add meaningful citations
+            if highlight and len(highlight) > 20:
+                seed_citations.append({
+                    "id": seed_id,
+                    "label": highlight[:50] + "..." if len(highlight) > 50 else highlight,
+                    "source": source
+                })
+        
         context_text = json.dumps(clean_context, indent=2)
         
-        if not context_result:
-            context_text = "No direct matches found in knowledge base."
-            
-        print(f"\n[DEBUG] RAG Context ({len(context_result)} items):\n{context_text}\n")
+        print(f"\n[DEBUG] Hybrid RAG Context ({len(clean_context)} items, Quality: {context_quality:.2f}):\n{context_text[:1000]}...\n")
         
-        # 2. Conflict Detection (Neurosymbolic Safety Check)
+        # ===== Handle Response Modes (3 territories: known, uncertain, new) =====
+        if territory == "new":
+            # Mode C: New Territory - No meaningful matches
+            system_prompt = f"""You are a helpful knowledge assistant. 
+This topic is NOT in the user's knowledge base. No relevant concepts were found.
+
+INSTRUCTIONS:
+1. Clearly state: "This topic is not yet in your knowledge base."
+2. Provide general knowledge from your training, clearly labeled as such.
+3. Suggest starting a "Learning Session" on this topic.
+"""
+        elif territory == "uncertain":
+            # Mode B: Uncertain Territory - Weak matches that may or may not be relevant
+            system_prompt = f"""You are a helpful knowledge assistant.
+The following context was found but may not be directly relevant to the question.
+Max relevance score: {context_quality:.2f} (weak match)
+
+Available Context:
+{context_text if clean_context else "No context available."}
+
+CRITICAL INSTRUCTIONS:
+1. FIRST, evaluate if the provided context ACTUALLY addresses the user's specific question.
+2. IF CONTEXT IS NOT RELEVANT to the question asked:
+   - Say clearly: "This topic is not yet in your knowledge base."
+   - Provide general knowledge from your training
+   - Suggest a "Learning Session" for this topic
+3. IF CONTEXT IS RELEVANT (even partially):
+   - Use it to inform your answer
+   - Acknowledge what's covered and what isn't
+
+You have FULL AUTHORITY to ignore irrelevant context. Don't force-fit weak matches.
+"""
+        else:
+            # Mode A: Known Territory - Strong concept match found
+            system_prompt = f"""You are a helpful knowledge assistant for a learning session. 
+Strong concept matches were found in the knowledge base.
+
+Context:
+{context_text}
+
+INSTRUCTIONS:
+1. Use the provided context to answer the question
+2. Prioritize Concepts (verified knowledge) over raw Evidence
+3. Reference sources naturally (e.g., "Based on your knowledge of X...")
+4. If partially relevant, acknowledge what's covered and what isn't
+"""
+        
+        # ===== Conflict Detection =====
         conflict_warnings = []
         try:
-            # Also async this if possible, but conflict check is usually fast vector search
             conflicts = await rag_service.detect_conflicts(request.message)
             if conflicts:
                 for c in conflicts:
@@ -100,59 +165,62 @@ async def chat_session(request: ChatRequest):
         except Exception as e:
             print(f"Conflict Check Failed: {e}")
 
-        # 3. Generate Answer
-        system_prompt = f"""You are a helpful assistant for a knowledge session. 
-        Use the following context to answer the user's question. 
-        If the answer is not in the context, say you don't know but offer general knowledge.
-        
-        Context:
-        {context_text}
-        """
-        
+        # ===== Generate Answer =====
         response = await llm.ainvoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=request.message)
         ])
         
-        # --- Phase 13: Log Chat Signal ---
+        # ===== Phase 13: Log Chat Signal =====
         try:
             from backend.app.db.arango import db
             from datetime import datetime
             
             arango_db = db.get_db()
             
-            # Ensure collection exists
             if not arango_db.has_collection("SessionSignals"):
                 arango_db.create_collection("SessionSignals")
             
-            # Extract concept labels from context for tracking
             concepts_referenced = [
-                item.get("label", "Unknown")[:100] 
-                for item in clean_context[:5]  # Top 5 concepts
-                if item.get("label")
+                c.get("label", "Unknown")[:100] 
+                for c in concept_citations[:5]
             ]
             
             chat_signal = {
                 "session_id": request.session_id,
                 "signal_type": "chat_interaction",
-                "prompt": request.message[:500],  # Truncate for storage
+                "prompt": request.message[:500],
                 "prompt_length": len(request.message),
                 "response_length": len(response.content),
                 "concepts_referenced": concepts_referenced,
+                "territory": territory,
+                "context_quality": context_quality,
                 "created_at": datetime.utcnow().isoformat()
             }
             
             arango_db.collection("SessionSignals").insert(chat_signal)
-            print(f"[Analytics] Logged chat signal: {len(concepts_referenced)} concepts referenced")
+            print(f"[Analytics] Logged chat signal: {len(concepts_referenced)} concepts, territory={territory}")
             
         except Exception as log_error:
             print(f"[Analytics] Warning: Failed to log chat signal: {log_error}")
-            # Don't fail the request if logging fails
         
+        # ===== Build Response with Phase 14 Metadata =====
         return {
             "response": response.content,
             "conflicts": conflict_warnings,
-            "context": context_result # Return raw nodes for Graph Visualization
+            "context": all_results,  # Full hybrid results
+            
+            # Phase 14: New metadata fields
+            "grounded": not is_new_territory,
+            "territory": territory,
+            "context_quality": round(context_quality, 2),
+            "missed_concepts": missed_concepts,
+            
+            # Structured citations
+            "citations": {
+                "concepts": concept_citations[:5],
+                "evidence": seed_citations[:5]
+            }
         }
         
     except Exception as e:

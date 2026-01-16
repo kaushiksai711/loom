@@ -109,40 +109,39 @@ export default function Home() {
 
       const data = await res.json();
 
-      // 1. Update Chat with concept citations
-      const citations = data.context && Array.isArray(data.context)
-        ? data.context
-          .filter((c: any) => c.doc?.label || c.doc?.highlight || c.doc?.source_url)
-          .slice(0, 5)
-          .map((c: any) => {
-            // Derive a meaningful label
-            let label = c.doc?.label;  // Concepts have labels
-            if (!label) {
-              // Seeds: Try to extract from source URL hostname
-              if (c.doc?.source_url) {
-                try {
-                  label = new URL(c.doc.source_url).hostname.replace('www.', '');
-                } catch { label = null; }
-              }
-              // Fallback: First 25 chars of highlight
-              if (!label && c.doc?.highlight) {
-                label = c.doc.highlight.substring(0, 25).trim() + '...';
-              }
-              // Final fallback
-              if (!label) label = 'Source';
-            }
-            return {
-              id: c.doc?._id || c.doc?.label,
-              label: label
-            };
-          })
-        : [];
+      // ===== PHASE 14: Extract structured citations =====
+      const conceptCitations = data.citations?.concepts || [];
+      const evidenceCitations = data.citations?.evidence || [];
+      const territory = data.territory || 'known';
+      const contextQuality = data.context_quality || 0;
+      const missedConcepts = data.missed_concepts || [];
+      const isGrounded = data.grounded !== false;
 
-      setMessages(prev => [...prev, {
+      // Combine citations: Concepts first (more important), then evidence
+      const allCitations = [
+        ...conceptCitations.map((c: any) => ({
+          id: c.id,
+          label: c.label,
+          type: 'concept'
+        })),
+        ...evidenceCitations.slice(0, 3).map((e: any) => ({
+          id: e.id,
+          label: e.label,
+          type: 'evidence'
+        }))
+      ];
+
+      // Build message with territory metadata
+      const assistantMessage: any = {
         role: 'assistant',
         content: data.response,
-        citations: citations
-      }]);
+        citations: allCitations,
+        territory: territory,
+        contextQuality: contextQuality,
+        isGrounded: isGrounded
+      };
+
+      setMessages(prev => [...prev, assistantMessage]);
 
       // 2. Update Graph (Avatar Analysis) & State
       if (data.context && Array.isArray(data.context)) {
@@ -156,7 +155,17 @@ export default function Home() {
             id: Date.now().toString(),
             type: 'conflict',
             title: 'Contradiction Detected',
-            message: `New evidence conflicts with ${conflict.doc.label || 'existing knowledge'}`,
+            message: `New evidence conflicts with ${conflict.doc?.label || 'existing knowledge'}`,
+            timestamp: new Date()
+          }, ...prev]);
+        } else if (territory === 'new') {
+          // Phase 14: Alert for new territory
+          setAvatarState('INSIGHT');
+          setAlerts(prev => [{
+            id: Date.now().toString(),
+            type: 'info',
+            title: 'New Territory',
+            message: 'This topic is new to your knowledge base. Consider starting a learning session.',
             timestamp: new Date()
           }, ...prev]);
         } else if (data.context.some((c: any) => c.score > 0.85)) {
@@ -166,6 +175,17 @@ export default function Home() {
         }
       } else {
         setAvatarState('IDLE');
+      }
+
+      // Phase 14: Missed concepts alert
+      if (missedConcepts.length > 0) {
+        setAlerts(prev => [{
+          id: `gap-${Date.now()}`,
+          type: 'warning',
+          title: 'Potential Knowledge Gap',
+          message: `${missedConcepts.length} high-relevance evidence may need crystallization`,
+          timestamp: new Date()
+        }, ...prev]);
       }
 
     } catch (err) {
@@ -378,6 +398,7 @@ export default function Home() {
   // Main Graph Data and Selection State
   const [selectedNode, setSelectedNode] = useState<any>(null); // For "Explainability" Panel
   const [showSource, setShowSource] = useState(false); // Toggle for Inspection
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null); // Phase 14: Graph navigation
 
   // Right Panel View State
   const [activeRightView, setActiveRightView] = useState<'AVATAR' | 'GRAPH'>('AVATAR');
@@ -512,6 +533,11 @@ export default function Home() {
               const node = graphData.nodes.find(n => n.id === label || n.id === conceptId);
               if (node) {
                 setSelectedNode(node);
+                // Phase 14: Navigate graph to the node
+                setFocusedNodeId(node.id);
+                setActiveRightView('GRAPH'); // Switch to graph tab
+                // Clear focus after animation completes
+                setTimeout(() => setFocusedNodeId(null), 3000);
               }
             }}
           />
@@ -563,6 +589,7 @@ export default function Home() {
                 data={graphData}
                 isCrystallized={isCrystallized}
                 onNodeClick={handleNodeClick}
+                focusedNodeId={focusedNodeId}
               />
 
               {/* System Info Overlay */}
