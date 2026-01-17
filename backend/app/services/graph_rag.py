@@ -1254,12 +1254,24 @@ class GraphRAGService:
             content = response.content.replace("```json", "").replace("```", "").strip()
             representations = json.loads(content)
             
-            # 4. Cache in DB
-            self.db.collection("Concepts").update({
+            # 4. Cache in DB + Mark as eligible for spaced repetition
+            # Check if this is the first time learning (first_learned not set)
+            update_data = {
                 "_key": key,
                 "representations": representations,
-                "scaffold_generated_at": datetime.datetime.utcnow().isoformat()
-            })
+                "scaffold_generated_at": datetime.datetime.utcnow().isoformat(),
+                "scaffold_generated": True  # Phase 15: Mark for spaced repetition
+            }
+            
+            # Only set first_learned if not already set (preserve original learning date)
+            if not concept.get("first_learned"):
+                update_data["first_learned"] = datetime.datetime.utcnow().isoformat()
+                # Also initialize next_review to 1 day from now (first review)
+                from datetime import timedelta
+                update_data["next_review"] = (datetime.datetime.utcnow() + timedelta(days=1)).isoformat()
+                update_data["review_count"] = 0
+            
+            self.db.collection("Concepts").update(update_data)
             
             print(f"[Scaffold] Generated and cached for '{concept.get('label')}'")
             return representations

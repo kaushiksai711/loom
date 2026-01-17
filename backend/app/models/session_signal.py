@@ -25,7 +25,11 @@ class SessionSignalCreate(BaseModel):
     format_chosen: Literal["hands_on", "visual", "socratic", "textual"]
     dwell_time_ms: int = 0
     time_since_last_interaction_ms: int = 0
-    interaction_type: Literal["scaffold_click", "tab_switch", "content_scroll", "card_close"] = "scaffold_click"
+    interaction_type: Literal["scaffold_click", "tab_switch", "content_scroll", "card_close", "socratic_answer"] = "scaffold_click"
+    
+    # Phase 13.5: Socratic question tracking
+    question_index: Optional[int] = None  # 0=Q1 (concept), 1=Q2, 2=Q3 (domain)
+    understood: Optional[bool] = None  # True = "I got it", False = "Need practice"
 
 
 # --- Phase 13: Chat Signal Tracking ---

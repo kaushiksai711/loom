@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, Network, FileText, Settings, Activity, MessageSquare } from "lucide-react";
+import { LayoutDashboard, Network, FileText, Settings, Activity, MessageSquare, Brain } from "lucide-react";
 
 const navItems = [
     { name: "Mission Control", href: "/", icon: LayoutDashboard },
     { name: "Neuro Chat", href: "/chat", icon: MessageSquare },
     { name: "Knowledge Graph", href: "/graph", icon: Network },
+    { name: "Review", href: "/review", icon: Brain },  // Phase 15: Spaced Repetition
     { name: "Evidence Locker", href: "/ingest", icon: FileText },
     { name: "Settings", href: "/settings", icon: Settings },
 ];

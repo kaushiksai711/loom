@@ -37,6 +37,10 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
     // Phase 13: Track actual dwell time
     const [tabStartTime, setTabStartTime] = useState<number>(Date.now());
 
+    // Phase 13.5: Mastery and fading
+    const [fadingLevel, setFadingLevel] = useState<'novice' | 'learning' | 'proficient' | 'mastered'>('novice');
+    const [showFadedContent, setShowFadedContent] = useState(false);
+
     // Guard against double fetch (React StrictMode in dev)
     const hasFetched = useRef(false);
 
@@ -54,7 +58,19 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
         setError(null);
 
         try {
-            // Phase 13: Fetch user's preferred format FIRST
+            // Phase 13.5: Fetch mastery level first
+            try {
+                const masteryRes = await fetch(`/api/v1/session/concept/${conceptId}/mastery`);
+                if (masteryRes.ok) {
+                    const { fading_level } = await masteryRes.json();
+                    setFadingLevel(fading_level);
+                    console.log(`[ConceptCard] Mastery level: ${fading_level}`);
+                }
+            } catch (e) {
+                console.warn('Could not fetch mastery, using novice:', e);
+            }
+
+            // Phase 13: Fetch user's preferred format
             try {
                 const prefRes = await fetch(`/api/v1/session/${sessionId}/preference`);
                 if (prefRes.ok) {
@@ -194,10 +210,41 @@ export default function ConceptCard({ conceptId, label, sessionId, onClose }: Co
                         </div>
                     ) : scaffold ? (
                         <>
-                            {activeTab === 'hands_on' && <CodeBlock code={scaffold.hands_on} />}
-                            {activeTab === 'visual' && <MermaidDiagram code={scaffold.visual.content} />}
-                            {activeTab === 'socratic' && <SocraticQuestions questions={scaffold.socratic.questions} />}
-                            {activeTab === 'textual' && <TextContent content={scaffold.textual} />}
+                            {/* Phase 13.5: Fading overlay for proficient/mastered */}
+                            {(fadingLevel === 'proficient' || fadingLevel === 'mastered') && !showFadedContent && (
+                                <div className="mb-4 p-4 rounded-lg bg-gradient-to-r from-emerald-500/20 to-teal-500/20 border border-emerald-500/30">
+                                    <p className="text-emerald-400 font-medium">
+                                        {fadingLevel === 'mastered'
+                                            ? '🏆 You\'ve mastered this concept!'
+                                            : '📈 You\'re getting proficient!'}
+                                    </p>
+                                    <p className="text-slate-400 text-sm mt-1">
+                                        Try recalling what you know before viewing the content.
+                                    </p>
+                                    <button
+                                        onClick={() => setShowFadedContent(true)}
+                                        className="mt-3 px-4 py-2 bg-slate-800 text-slate-200 rounded-lg hover:bg-slate-700 transition-colors text-sm"
+                                    >
+                                        Show content anyway
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* Show content if novice/learning or user clicked reveal */}
+                            {(fadingLevel === 'novice' || fadingLevel === 'learning' || showFadedContent) && (
+                                <>
+                                    {activeTab === 'hands_on' && <CodeBlock code={scaffold.hands_on} />}
+                                    {activeTab === 'visual' && <MermaidDiagram code={scaffold.visual.content} />}
+                                    {activeTab === 'socratic' && (
+                                        <SocraticQuestions
+                                            questions={scaffold.socratic.questions}
+                                            conceptId={conceptId}
+                                            sessionId={sessionId}
+                                        />
+                                    )}
+                                    {activeTab === 'textual' && <TextContent content={scaffold.textual} />}
+                                </>
+                            )}
                         </>
                     ) : null}
                 </div>
@@ -358,8 +405,18 @@ function MermaidDiagram({ code }: { code: string }) {
     );
 }
 
-function SocraticQuestions({ questions }: { questions: string[] }) {
+function SocraticQuestions({
+    questions,
+    conceptId,
+    sessionId
+}: {
+    questions: string[];
+    conceptId: string;
+    sessionId: string;
+}) {
     const [revealed, setRevealed] = useState<Set<number>>(new Set());
+    const [answered, setAnswered] = useState<Set<number>>(new Set());
+    const [answeredCorrectly, setAnsweredCorrectly] = useState<Set<number>>(new Set());
 
     const toggleReveal = (idx: number) => {
         setRevealed(prev => {
@@ -370,26 +427,58 @@ function SocraticQuestions({ questions }: { questions: string[] }) {
         });
     };
 
+    // Phase 13.5: Log answer and update mastery
+    const handleAnswer = async (idx: number, understood: boolean, e: React.MouseEvent) => {
+        e.stopPropagation(); // Prevent toggle reveal
+
+        try {
+            await fetch(`/api/v1/session/${sessionId}/signal`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    concept_id: conceptId,
+                    format_chosen: 'socratic',
+                    interaction_type: 'socratic_answer',
+                    question_index: idx,
+                    understood: understood,
+                    dwell_time_ms: 0,
+                    time_since_last_interaction_ms: 0
+                })
+            });
+            console.log(`[SocraticQuestions] Q${idx + 1} answered: ${understood ? 'I got it' : 'Need practice'}`);
+        } catch (e) {
+            console.warn('Failed to log socratic answer:', e);
+        }
+
+        setAnswered(prev => new Set([...prev, idx]));
+
+        // Track if they got it right for different feedback messages
+        if (understood) {
+            setAnsweredCorrectly(prev => new Set([...prev, idx]));
+        }
+    };
+
     const difficultyLabels = ['🟢 Warm-up', '🟡 Challenge', '🔴 Deep Dive'];
 
     return (
         <div className="space-y-4">
             <p className="text-slate-400 text-sm mb-4">
-                Click each question to reveal and think through your answer.
+                Click each question to reveal, think through your answer, then tell us how you did.
             </p>
             {questions.map((q, idx) => (
                 <div
                     key={idx}
-                    onClick={() => toggleReveal(idx)}
-                    className={`p-4 rounded-lg border cursor-pointer transition-all ${revealed.has(idx)
+                    onClick={() => !revealed.has(idx) && toggleReveal(idx)}
+                    className={`p-4 rounded-lg border transition-all ${revealed.has(idx)
                         ? 'bg-amber-500/10 border-amber-500/50'
-                        : 'bg-slate-800 border-slate-700 hover:border-amber-500/30'
+                        : 'bg-slate-800 border-slate-700 hover:border-amber-500/30 cursor-pointer'
                         }`}
                 >
                     <div className="flex items-start gap-3">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-lg ${revealed.has(idx) ? 'bg-amber-500/20' : 'bg-slate-700'
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-lg ${answered.has(idx) ? 'bg-green-500/20' :
+                            revealed.has(idx) ? 'bg-amber-500/20' : 'bg-slate-700'
                             }`}>
-                            {idx + 1}
+                            {answered.has(idx) ? '✓' : idx + 1}
                         </div>
                         <div className="flex-1">
                             <span className="text-xs text-slate-500 mb-1 block">{difficultyLabels[idx] || 'Question'}</span>
@@ -398,6 +487,36 @@ function SocraticQuestions({ questions }: { questions: string[] }) {
                             </p>
                             {!revealed.has(idx) && (
                                 <p className="text-amber-400 text-sm mt-2">Click to reveal</p>
+                            )}
+
+                            {/* Phase 13.5: Answer buttons */}
+                            {revealed.has(idx) && !answered.has(idx) && (
+                                <div className="flex gap-2 mt-3">
+                                    <button
+                                        onClick={(e) => handleAnswer(idx, true, e)}
+                                        className="px-3 py-1.5 bg-green-500/20 text-green-400 rounded-lg hover:bg-green-500/30 transition-colors text-sm font-medium"
+                                    >
+                                        ✓ I got it
+                                    </button>
+                                    <button
+                                        onClick={(e) => handleAnswer(idx, false, e)}
+                                        className="px-3 py-1.5 bg-slate-700 text-slate-400 rounded-lg hover:bg-slate-600 transition-colors text-sm"
+                                    >
+                                        Need more practice
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* Answered state - show different messages */}
+                            {answered.has(idx) && (
+                                <p className={`text-sm mt-2 ${answeredCorrectly.has(idx)
+                                    ? 'text-green-400'
+                                    : 'text-amber-400'
+                                    }`}>
+                                    {answeredCorrectly.has(idx)
+                                        ? 'Great! Keep up the learning momentum.'
+                                        : 'No worries! Review this concept again later.'}
+                                </p>
                             )}
                         </div>
                     </div>

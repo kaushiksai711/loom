@@ -220,17 +220,109 @@ async def get_concept_scaffold(concept_id: str):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+# --- Phase 13.5: Mastery & Fading Scaffolds ---
+
+@router.get("/concept/{concept_id:path}/mastery")
+async def get_concept_mastery(concept_id: str):
+    """
+    Get mastery level and fading level for a concept.
+    
+    Returns:
+        mastery: float (0.0 - 1.0)
+        fading_level: "novice" | "learning" | "proficient" | "mastered"
+        
+    Thresholds are configurable via env vars:
+        MASTERY_THRESHOLD_LEARNING (default 0.3)
+        MASTERY_THRESHOLD_PROFICIENT (default 0.6)
+        MASTERY_THRESHOLD_MASTERED (default 0.9)
+    """
+    from backend.app.db.arango import db
+    from backend.app.core.config import settings
+    
+    try:
+        arango_db = db.get_db()
+        
+        # Handle both "Concepts/123" and "123" formats
+        key = concept_id.split("/")[-1] if "/" in concept_id else concept_id
+        concept = arango_db.collection("Concepts").get(key)
+        
+        if not concept:
+            raise HTTPException(status_code=404, detail=f"Concept not found: {concept_id}")
+        
+        mastery = concept.get("mastery", 0.1)
+        
+        # Calculate fading level from configurable thresholds
+        if mastery >= settings.MASTERY_THRESHOLD_MASTERED:
+            fading_level = "mastered"
+        elif mastery >= settings.MASTERY_THRESHOLD_PROFICIENT:
+            fading_level = "proficient"
+        elif mastery >= settings.MASTERY_THRESHOLD_LEARNING:
+            fading_level = "learning"
+        else:
+            fading_level = "novice"
+        
+        return {
+            "concept_id": concept_id,
+            "mastery": mastery,
+            "fading_level": fading_level,
+            "thresholds": {
+                "learning": settings.MASTERY_THRESHOLD_LEARNING,
+                "proficient": settings.MASTERY_THRESHOLD_PROFICIENT,
+                "mastered": settings.MASTERY_THRESHOLD_MASTERED
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # --- Phase 12: Signal Capture (Layer B4) ---
 
 from backend.app.models.session_signal import SessionSignalCreate
 from backend.app.db.arango import db
+from backend.app.core.config import settings
 from datetime import datetime
+
+# Phase 13.5: Helper to update concept mastery
+async def update_concept_mastery(concept_id: str, boost: float) -> float:
+    """Update mastery score for a concept. Returns new mastery value."""
+    arango_db = db.get_db()
+    
+    try:
+        # Handle both "Concepts/123" and "123" formats
+        key = concept_id.split("/")[-1] if "/" in concept_id else concept_id
+        concept = arango_db.collection("Concepts").get(key)
+        
+        if not concept:
+            return 0.0
+        
+        current_mastery = concept.get("mastery", 0.1)
+        new_mastery = min(1.0, current_mastery + boost)
+        
+        arango_db.collection("Concepts").update({
+            "_key": key,
+            "mastery": new_mastery
+        })
+        
+        print(f"[Phase 13.5] Mastery updated: {concept_id} -> {new_mastery:.2f} (+{boost})")
+        return new_mastery
+        
+    except Exception as e:
+        print(f"[Phase 13.5] Mastery update failed: {e}")
+        return 0.0
+
 
 @router.post("/{session_id}/signal")
 async def log_signal(session_id: str, signal: SessionSignalCreate):
     """
     Log a user interaction with a scaffold format.
     Used for learning analytics and adaptive priming.
+    
+    Phase 13.5: Also updates mastery on positive signals:
+    - Long dwell time (>30s) = +0.05
+    - Socratic Q1 answered "I got it" = +0.10
+    - Socratic Q2/Q3 answered "I got it" = +0.05
     """
     try:
         arango_db = db.get_db()
@@ -246,11 +338,42 @@ async def log_signal(session_id: str, signal: SessionSignalCreate):
             "dwell_time_ms": signal.dwell_time_ms,
             "time_since_last_interaction_ms": signal.time_since_last_interaction_ms,
             "interaction_type": signal.interaction_type,
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
+            # Phase 13.5: Socratic answer fields
+            "question_index": signal.question_index,
+            "understood": signal.understood
         }
         
         arango_db.collection("SessionSignals").insert(signal_doc)
-        return {"status": "logged", "session_id": session_id}
+        
+        # Phase 13.5: Update mastery on positive signals
+        mastery_boost = 0.0
+        mastery_reason = None
+        
+        if signal.concept_id:
+            # Long dwell time = understanding (opposite of confusion signal)
+            if signal.dwell_time_ms > 30000:  # > 30 seconds
+                mastery_boost = 0.05
+                mastery_reason = "long_dwell"
+            
+            # Socratic question answered "I got it"
+            if signal.interaction_type == "socratic_answer" and signal.understood:
+                if signal.question_index == 0:  # Q1 = concept mastery
+                    mastery_boost = 0.10
+                    mastery_reason = "socratic_q1"
+                else:  # Q2/Q3 = domain understanding
+                    mastery_boost = 0.05
+                    mastery_reason = "socratic_q2q3"
+            
+            if mastery_boost > 0:
+                await update_concept_mastery(signal.concept_id, mastery_boost)
+        
+        return {
+            "status": "logged", 
+            "session_id": session_id,
+            "mastery_boost": mastery_boost,
+            "mastery_reason": mastery_reason
+        }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -562,3 +685,46 @@ async def get_format_preference(session_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# --- Phase 15: Related Concepts ---
+
+@router.get("/concept/{concept_id:path}/related")
+async def get_related_concepts(concept_id: str, limit: int = 5):
+    """
+    Returns 1-hop neighbors of a concept with edge types.
+    Used for the "See Related" panel in the graph view.
+    """
+    try:
+        arango_db = db.get_db()
+        
+        # Handle both "Concepts/123" and "123" formats
+        full_id = concept_id if "/" in concept_id else f"Concepts/{concept_id}"
+        
+        aql = """
+        FOR v, e IN 1..1 ANY @concept_id Relationships
+            LIMIT @limit
+            RETURN {
+                _id: v._id,
+                _key: v._key,
+                label: v.label,
+                definition: SUBSTRING(v.definition, 0, 100),
+                relation: e.type,
+                direction: e._from == @concept_id ? "outbound" : "inbound",
+                mastery: v.mastery || 0.1,
+                scaffold_generated: v.scaffold_generated || false
+            }
+        """
+        
+        related = list(arango_db.aql.execute(aql, bind_vars={
+            "concept_id": full_id,
+            "limit": limit
+        }))
+        
+        return {
+            "concept_id": concept_id,
+            "related": related,
+            "count": len(related)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

@@ -47,6 +47,10 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [showConceptCard, setShowConceptCard] = useState(false);
 
+  // Phase 15: Related concepts state
+  const [showRelated, setShowRelated] = useState(false);
+  const [relatedConcepts, setRelatedConcepts] = useState<any[]>([]);
+
   // Graph Data State
   const [graphData, setGraphData] = useState<{ nodes: any[], links: any[] }>({
     nodes: [
@@ -315,6 +319,7 @@ export default function Home() {
         group: n.type === 'source' ? 'source' : (n.type === 'session_node' ? 'session' : 'concept'),
         val: n.type === 'session_node' ? 20 : (n.val || 5), // Boost Session Nodes
         status: n.status || 'neutral',
+        mastery: n.mastery, // Phase 13.5: Include mastery for display
         citation: `Global Influence: ${n.val ?? 'N/A'}`,
         sourceText: n.definition || n.text || n.description || n.highlight || "Content not available in graph node."
       }));
@@ -620,7 +625,9 @@ export default function Home() {
                     }`}>
                     {selectedNode.status || 'Verified'}
                   </span>
-                  <span className="text-xs text-slate-500">Val: {Math.round(selectedNode.val)}</span>
+                  <span className="text-xs text-slate-500">
+                    Mastery: {selectedNode.mastery !== undefined ? `${Math.round(selectedNode.mastery * 100)}%` : 'N/A'}
+                  </span>
                 </div>
 
                 {/* Content Area */}
@@ -657,7 +664,50 @@ export default function Home() {
                         >
                           🎓 Learn This
                         </button>
+
+                        {/* Phase 15: See Related Button */}
+                        <button
+                          onClick={async () => {
+                            if (!selectedNode) return;
+                            try {
+                              const res = await fetch(`/api/v1/session/concept/${selectedNode.id}/related`);
+                              if (res.ok) {
+                                const data = await res.json();
+                                setRelatedConcepts(data.related || []);
+                                setShowRelated(!showRelated);
+                              }
+                            } catch (e) {
+                              console.warn('Failed to fetch related:', e);
+                            }
+                          }}
+                          className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1.5 rounded text-white transition-colors"
+                        >
+                          🔗 Related
+                        </button>
                       </div>
+
+                      {/* Phase 15: Related Concepts Panel */}
+                      {showRelated && relatedConcepts.length > 0 && (
+                        <div className="mt-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700/30">
+                          <div className="text-xs text-slate-400 mb-2">Related Concepts:</div>
+                          <div className="flex flex-wrap gap-2">
+                            {relatedConcepts.map((r: any) => (
+                              <span
+                                key={r._id}
+                                className="px-2 py-1 bg-slate-700/50 text-slate-300 text-xs rounded cursor-pointer hover:bg-slate-600/50"
+                                onClick={() => {
+                                  // Navigate to this concept
+                                  const node = graphData.nodes.find((n: any) => n.id === r._id);
+                                  if (node) setSelectedNode(node);
+                                }}
+                              >
+                                {r.label}
+                                <span className="text-slate-500 ml-1">({r.relation})</span>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </>
                 ) : (
